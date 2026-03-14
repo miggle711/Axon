@@ -13,54 +13,129 @@ import (
 //   4. Nack > Remove from running + add to failed list + update job status to "failed"
 
 type Queue struct {
-	store *store.RedisStore
+	jobStore store.JobStore
+	ops      store.QueueOperations
+	metrics  store.QueueMetrics
 }
 
 type Stats struct {
-	PendingJobs    int `json:"pending_jobs"`     // number of jobs currently waiting in the queue to be processed
-	InProgressJobs int `json:"in_progress_jobs"` // number of jobs currently being processed by workers
-	CompletedJobs  int `json:"completed_jobs"`   // number of jobs that have been successfully completed
-	FailedJobs     int `json:"failed_jobs"`      // number of jobs that have failed after reaching max retries
-	Throughput     int `json:"throughput"`       // number of jobs processed per unit time
+	PendingJobs    int64   `json:"pending_jobs"`     // number of jobs currently waiting in the queue to be processed
+	InProgressJobs int64   `json:"in_progress_jobs"` // number of jobs currently being processed by workers
+	CompletedJobs  int64   `json:"completed_jobs"`   // number of jobs that have been successfully completed
+	FailedJobs     int64   `json:"failed_jobs"`      // number of jobs that have failed after reaching max retries
+	Throughput     float64 `json:"throughput"`       // number of jobs processed per unit time
 }
 
-func NewQueue(store *store.RedisStore) *Queue {
-	// Queue constructor that initializes the queue with a Redis store for job management and persistence.
-	// Abstracts away the underlying storage mechanism, allowing for potential future support of other storage backends without changing the queue interface.
-	return &Queue{store: store}
+// NewQueue creates a Queue with separate interfaces for job storage, queue operations, and metrics.
+// Allows for flexible implementations of each concern.
+func NewQueue(jobStore store.JobStore, ops store.QueueOperations, metrics store.QueueMetrics) *Queue {
+	return &Queue{
+		jobStore: jobStore,
+		ops:      ops,
+		metrics:  metrics,
+	}
 }
 
 func (q *Queue) Enqueue(ctx context.Context, job *queue.Job) error {
-	err := q.store.StoreJob(job)
+	err := q.jobStore.StoreJob(ctx, job)
 	if err != nil {
 		return err
 	}
-	return q.store.AddToPending(job, job.Priority)
+	return q.ops.AddToPending(ctx, job, job.Priority)
 }
 
 func (q *Queue) Dequeue(ctx context.Context) (*queue.Job, error) {
-	// Implementation to retrieve and remove a job from the queue using the Redis store.
-	return q.store.PopFromPending()
+	// retrieve and remove a job from the queue using the Redis store.
+	job, err := q.ops.PopFromPending(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if job != nil {
+		err = q.ops.AddToRunning(ctx, job)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return job, nil
 }
 
 func (q *Queue) Ack(ctx context.Context, jobID string) error {
-	// Implementation to acknowledge the completion of a job, which may involve removing it from a processing list or marking it as completed in the Redis store.
-	return nil
+	// Job completion handler
+	// Remove the job from the running_jobs set
+	err := q.ops.RemoveFromRunning(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	// Track as completed for throughput calculation
+	err = q.ops.AddToCompleted(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	return q.jobStore.UpdateJobStatus(ctx, jobID, "completed")
 }
 
 func (q *Queue) Nack(ctx context.Context, jobID string, reason string) error {
-	// Implementation to negatively acknowledge a job, which may involve re-queuing it or marking it as failed in the Redis store.
-	return nil
+	// Job failure handler
+	// Remove the job from the running_jobs set and add it to the failed_jobs list
+	err := q.ops.RemoveFromRunning(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	// Retrieve the job to pass to AddToFailed
+	job, err := q.jobStore.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if job != nil {
+		err = q.ops.AddToFailed(ctx, job, reason)
+		if err != nil {
+			return err
+		}
+	}
+	return q.jobStore.UpdateJobStatus(ctx, jobID, "failed")
 }
 
 func (q *Queue) GetJobStatus(ctx context.Context, jobID string) (string, error) {
-	// Implementation to retrieve the current status of a job from the Redis store.
-	return "", nil
+	// retrieve the current status of a job.
+	job, err := q.jobStore.GetJob(ctx, jobID)
+	if err != nil {
+		return "", err
+	}
+	if job == nil {
+		return "not found", nil // job does not exist in the store
+	}
+	return job.Status, nil
 }
 
 func (q *Queue) GetStats(ctx context.Context) (*Stats, error) {
-	// Implementation to gather and return statistics about the queue, such as the number of pending, in-progress, completed, and failed jobs, as well as throughput.
-	return nil, nil
+	// Gather and return statistics about the queue.
+	pendingCount, err := q.metrics.GetPendingCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inProgressCount, err := q.metrics.GetInProgressCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	completedCount, err := q.metrics.GetCompletedCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	failedCount, err := q.metrics.GetFailedCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	throughput, err := q.metrics.GetThroughput(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Stats{
+		PendingJobs:    pendingCount,
+		InProgressJobs: inProgressCount,
+		CompletedJobs:  completedCount,
+		FailedJobs:     failedCount,
+		Throughput:     throughput,
+	}, nil
 }
 
 // Redis sorted set: for job scheduling and prioritization, where the score can represent the scheduled run time or priority level.

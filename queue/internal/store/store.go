@@ -10,30 +10,32 @@ import (
 	"fmt"
 )
 
+// JobStore interface handles job persistence
 type JobStore interface {
 	// standard interface for interacting with underlying storage
 	// prevents tight coupling between the queue implementation and the specific storage mechanism
-	// so the queue does not need to know about the details of how jobs are stored and retrieved, allowing for potential future support of other storage backends without changing the queue interface.
-	StoreJob(job *queue.Job) error
-	GetJob(jobID string) (*queue.Job, error)
-	HSet(key string, data map[string]interface{}) error
-	HGetAll(key string) (map[string]string, error)
-	UpdateJobStatus(jobID string, status string) error
+	StoreJob(ctx context.Context, job *queue.Job) error
+	GetJob(ctx context.Context, jobID string) (*queue.Job, error)
+	UpdateJobStatus(ctx context.Context, jobID string, status string) error
+}
+
+// QueueOperations interface handles all queue state transitions
+type QueueOperations interface {
+	AddToPending(ctx context.Context, job *queue.Job, priority int) error // adds a job to the pending queue with priority
+	PopFromPending(ctx context.Context) (*queue.Job, error) // pops highest priority job from pending
+	AddToRunning(ctx context.Context, job *queue.Job) error // moves job to running state
+	RemoveFromRunning(ctx context.Context, jobID string) error // removes job from running state
+	AddToFailed(ctx context.Context, job *queue.Job, reason string) error // moves job to failed state
+	AddToCompleted(ctx context.Context, jobID string) error // tracks job as completed with timestamp
+}
+
+// QueueMetrics interface handles queue statistics and monitoring
+type QueueMetrics interface {
 	GetPendingCount(ctx context.Context) (int64, error)
 	GetInProgressCount(ctx context.Context) (int64, error)
 	GetCompletedCount(ctx context.Context) (int64, error)
 	GetFailedCount(ctx context.Context) (int64, error)
 	GetThroughput(ctx context.Context) (float64, error)
-	AddToCompleted(ctx context.Context, jobID string) error
-}
-
-
-type QueueOperations interface {
-	AddToPending(job *queue.Job, priority int) error // adds a job to the pending queue with a specified priority, allowing for efficient retrieval of jobs based on their scheduling and prioritization
-	PopFromPending(ctx context.Context) (*queue.Job, error) // pops the highest priority job from the pending queue and returns it for processing
-	AddToRunning(job *queue.Job) error // add to set
-	RemoveFromRunning(jobID string) error // remove from set
-	AddToFailed(job *queue.Job, reason string) error // add to set
 }
 	
 
@@ -42,9 +44,19 @@ type RedisStore struct {
 	client *redis.Client
 }
 
-func (s *RedisStore) AddToPending(job *queue.Job, priority int) error {
+func NewRedisStore(redisURL string) (*RedisStore, error) {
+	// Initializes a new Redis client using the provided Redis URL and returns a RedisStore instance for managing job storage and retrieval.
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, err
+	}
+	client := redis.NewClient(opts)
+	return &RedisStore{client: client}, nil
+}
+
+func (s *RedisStore) AddToPending(ctx context.Context, job *queue.Job, priority int) error {
 	// Implementation to add a job to the pending queue in Redis, using a sorted set to manage job prioritization based on the provided priority level.
-	return s.client.ZAdd(context.Background(), "pending_jobs", redis.Z{
+	return s.client.ZAdd(ctx, "pending_jobs", redis.Z{
 		Score:  float64(priority), // use the priority as the score for sorting in the Redis sorted set
 		Member: job.ID, // use the job ID as the member of the sorted set for easy retrieval
 	}).Err()
@@ -63,69 +75,53 @@ func (s *RedisStore) PopFromPending(ctx context.Context) (*queue.Job, error) {
 	return s.GetJob(jobID) // retrieve the job details using the job ID
 }
 
-func (s *RedisStore) AddToRunning(job *queue.Job) error {
+func (s *RedisStore) AddToRunning(ctx context.Context, job *queue.Job) error {
 	// Implementation to add a job to the running set in Redis, allowing for tracking of jobs that are currently being processed by workers.
-	return s.client.SAdd(context.Background(), "running_jobs", job.ID).Err()
+	return s.client.SAdd(ctx, "running_jobs", job.ID).Err()
 }
 
-func (s *RedisStore) RemoveFromRunning(jobID string) error {
+func (s *RedisStore) RemoveFromRunning(ctx context.Context, jobID string) error {
 	// Implementation to remove a job from the running set in Redis, allowing for tracking of jobs that have completed processing or have been acknowledged by workers.
-	return s.client.SRem(context.Background(), "running_jobs", jobID).Err()
+	return s.client.SRem(ctx, "running_jobs", jobID).Err()
 }
 
-func (s *RedisStore) AddToFailed(job *queue.Job, reason string) error {
+func (s *RedisStore) AddToFailed(ctx context.Context, job *queue.Job, reason string) error {
 	// Implementation to add a job to the failed set in Redis, allowing for tracking of jobs that have failed after reaching the maximum number of retries.
 	failedEntry := fmt.Sprintf("%s:%s", job.ID, reason)
-  	return s.client.LPush(context.Background(), "failed_jobs", failedEntry).Err()
+	return s.client.LPush(ctx, "failed_jobs", failedEntry).Err()
 }
 
 
-
-
-func NewRedisStore(redisURL string) (*RedisStore, error) {
-	// Initializes a new Redis client using the provided Redis URL and returns a RedisStore instance for managing job storage and retrieval.
-	opts, err := redis.ParseURL(redisURL)
-	if err != nil {
-		return nil, err
-	}
-	client := redis.NewClient(opts)
-	return &RedisStore{client: client}, nil
-}
-
-
-func (s *RedisStore) StoreJob(job *queue.Job) error {
+func (s *RedisStore) StoreJob(ctx context.Context, job *queue.Job) error {
 	// Implementation to store the job details in the Redis hash, allowing for quick retrieval and updates of job information.
-	// use HSET command to store the job details in the Redis hash, with the job ID as the key and the job data as the value. This allows for efficient retrieval and updates of job information based on the unique job ID.
-
 	// convert the Job struct to a hash map to be stored as a Redis Hash
 	jobMap := map[string]interface{}{
-		"id":          job.ID, 
+		"id":          job.ID,
 		"type":        job.Type,
-		"payload":     job.Payload, // store the payload as a string, since it is already a JSON string in the Job struct
+		"payload":     job.Payload,
 		"status":      job.Status,
 		"priority":    job.Priority,
 		"retries":     job.Retries,
 		"max_retries": job.MaxRetries,
-		"created_at":  strconv.FormatInt(job.CreatedAt, 10), // store timestamp as a string to avoid issues with Redis hash storage
-		"run_at":      strconv.FormatInt(job.RunAt, 10),     // store timestamp as a string to avoid issues with Redis hash storage
+		"created_at":  strconv.FormatInt(job.CreatedAt, 10),
+		"run_at":      strconv.FormatInt(job.RunAt, 10),
 	}
 
-	err := s.HSet("job:"+job.ID, jobMap)
+	err := s.hset(ctx, "job:"+job.ID, jobMap)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *RedisStore) HSet(key string, values map[string]interface{}) error { // interface{} allows us to store values of any type in the Redis hash
-	// Implementation to set multiple fields in a Redis hash using the HSET command, allowing for efficient storage of job details.
-	// The key parameter represents the Redis hash key (e.g., "job:<job_id>"), and the values parameter is a map containing the field-value pairs to be stored in the hash.
-	return s.client.HSet(context.Background(), key, values).Err()
+// hset is a private helper method for setting Redis hash values
+func (s *RedisStore) hset(ctx context.Context, key string, values map[string]interface{}) error {
+	return s.client.HSet(ctx, key, values).Err()
 }
 
-func (s *RedisStore) GetJob(jobID string) (*queue.Job, error) {
+func (s *RedisStore) GetJob(ctx context.Context, jobID string) (*queue.Job, error) {
 	// Implementation to retrieve job details from the Redis hash using the job ID as the key.
-	jobMap, err := s.HGetAll("job:" + jobID)
+	jobMap, err := s.hgetall(ctx, "job:"+jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,37 +129,34 @@ func (s *RedisStore) GetJob(jobID string) (*queue.Job, error) {
 		return nil, nil // job not found
 	}
 
-	// strconv.Atoi and time.Parse to convert string values back to their original types (e.g., int, time.Time) when retrieving job details from the Redis hash, ensuring that the job data is correctly reconstructed for processing.
-	priority, _ := strconv.Atoi(jobMap["priority"]) // convert priority back to int
-	retries, _ := strconv.Atoi(jobMap["retries"]) // convert retries back to int
-	maxRetries, _ := strconv.Atoi(jobMap["max_retries"]) // convert max_retries back to int
-	createdAt, _ := time.Parse(time.RFC3339, jobMap["created_at"]) // convert created_at back to time.Time
-	runAt, _ := time.Parse(time.RFC3339, jobMap["run_at"]) // convert run_at back to time.Time
+	priority, _ := strconv.Atoi(jobMap["priority"])
+	retries, _ := strconv.Atoi(jobMap["retries"])
+	maxRetries, _ := strconv.Atoi(jobMap["max_retries"])
+	createdAt, _ := time.Parse(time.RFC3339, jobMap["created_at"])
+	runAt, _ := time.Parse(time.RFC3339, jobMap["run_at"])
 
 	job := &queue.Job{
 		ID:         jobMap["id"],
 		Type:       jobMap["type"],
-		Payload:    jobMap["payload"], // payload is stored as a string, so we can directly assign it back to the Job struct
+		Payload:    jobMap["payload"],
 		Status:     jobMap["status"],
 		Priority:   priority,
 		Retries:    retries,
 		MaxRetries: maxRetries,
-		CreatedAt:  createdAt.Unix(), // convert time to timestamp
-		RunAt:      runAt.Unix(),     // convert time to timestamp
+		CreatedAt:  createdAt.Unix(),
+		RunAt:      runAt.Unix(),
 	}
 	return job, nil
-
-
 }
 
-func (s *RedisStore) HGetAll(key string) (map[string]string, error) {
-	// retrieve all fields and values from a Redis hash using the HGETALL command, allowing for efficient retrieval of job details based on the job ID.
-    return s.client.HGetAll(context.Background(), key).Result()
-	}
+// hgetall is a private helper method for retrieving Redis hash values
+func (s *RedisStore) hgetall(ctx context.Context, key string) (map[string]string, error) {
+	return s.client.HGetAll(ctx, key).Result()
+}
 
-func (s *RedisStore) UpdateJobStatus(jobID string, status string) error {
+func (s *RedisStore) UpdateJobStatus(ctx context.Context, jobID string, status string) error {
 	// Implementation to update the status of a job in the Redis hash, allowing for tracking the state of the job as it progresses through the queue system.
-	return s.client.HSet(context.Background(), "job:"+jobID, "status", status).Err()
+	return s.client.HSet(ctx, "job:"+jobID, "status", status).Err()
 }
 
 func (s *RedisStore) GetPendingCount(ctx context.Context) (int64, error) {
