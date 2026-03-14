@@ -19,15 +19,21 @@ type JobStore interface {
 	HSet(key string, data map[string]interface{}) error
 	HGetAll(key string) (map[string]string, error)
 	UpdateJobStatus(jobID string, status string) error
+	GetPendingCount(ctx context.Context) (int64, error)
+	GetInProgressCount(ctx context.Context) (int64, error)
+	GetCompletedCount(ctx context.Context) (int64, error)
+	GetFailedCount(ctx context.Context) (int64, error)
+	GetThroughput(ctx context.Context) (float64, error)
+	AddToCompleted(ctx context.Context, jobID string) error
 }
 
 
 type QueueOperations interface {
 	AddToPending(job *queue.Job, priority int) error // adds a job to the pending queue with a specified priority, allowing for efficient retrieval of jobs based on their scheduling and prioritization
-	PopFromPending() // pops the highest priority job from the pending queue and returns it for processing
+	PopFromPending(ctx context.Context) (*queue.Job, error) // pops the highest priority job from the pending queue and returns it for processing
 	AddToRunning(job *queue.Job) error // add to set
 	RemoveFromRunning(jobID string) error // remove from set
-	AddToFailed(job *queue.Job) error // add to set
+	AddToFailed(job *queue.Job, reason string) error // add to set
 }
 	
 
@@ -44,9 +50,9 @@ func (s *RedisStore) AddToPending(job *queue.Job, priority int) error {
 	}).Err()
 }
 
-func (s *RedisStore) PopFromPending() (*queue.Job, error) {
+func (s *RedisStore) PopFromPending(ctx context.Context) (*queue.Job, error) {
 	// Implementation to pop the highest priority job from the pending queue in Redis, allowing for efficient retrieval of jobs based on their scheduling and prioritization.
-	id, err := s.client.ZPopMax(context.Background(), "pending_jobs").Result()
+	id, err := s.client.ZPopMax(ctx, "pending_jobs").Result()
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +164,55 @@ func (s *RedisStore) HGetAll(key string) (map[string]string, error) {
 func (s *RedisStore) UpdateJobStatus(jobID string, status string) error {
 	// Implementation to update the status of a job in the Redis hash, allowing for tracking the state of the job as it progresses through the queue system.
 	return s.client.HSet(context.Background(), "job:"+jobID, "status", status).Err()
+}
+
+func (s *RedisStore) GetPendingCount(ctx context.Context) (int64, error) {
+	// get the count of pending jobs from the Redis sorted set, allowing for tracking the number of jobs that are waiting to be processed.
+	return s.client.ZCard(ctx, "pending_jobs").Result()
+}
+
+func (s *RedisStore) GetInProgressCount(ctx context.Context) (int64, error) {
+	// get the count of in-progress jobs from the Redis set, allowing for tracking the number of jobs that are currently being processed by workers.
+	return s.client.SCard(ctx, "running_jobs").Result()
+}
+
+func (s *RedisStore) GetCompletedCount(ctx context.Context) (int64, error) {
+	// get the count of completed jobs from the Redis set, allowing for tracking the number of jobs that have been successfully processed and acknowledged by workers.
+	return s.client.SCard(ctx, "completed_jobs").Result()
+}
+
+func (s *RedisStore) GetFailedCount(ctx context.Context) (int64, error) {
+	// get the count of failed jobs from the Redis list, allowing for tracking the number of jobs that have failed after reaching the maximum number of retries.
+	return s.client.LLen(ctx, "failed_jobs").Result()
+}
+
+func (s *RedisStore) AddToCompleted(ctx context.Context, jobID string) error {
+	// track completed job with timestamp for throughput calculation.
+	// Add to completed set for total count
+	s.client.SAdd(ctx, "completed_jobs", jobID)
+
+	// Add to time-windowed sorted set (score = timestamp in seconds)
+	now := time.Now().Unix()
+	return s.client.ZAdd(ctx, "completed_jobs_timed", redis.Z{
+		Score:  float64(now),
+		Member: jobID,
+	}).Err()
+}
+
+func (s *RedisStore) GetThroughput(ctx context.Context) (float64, error) {
+	// Calculate throughput as jobs processed per second in the last minute.
+	// Uses time-windowed sorted set to track job completion timestamps.
+	oneMinuteAgo := time.Now().Add(-1 * time.Minute).Unix()
+
+	// Count jobs completed in the last 60 seconds
+	count, err := s.client.ZCount(ctx, "completed_jobs_timed",
+		fmt.Sprint(oneMinuteAgo), "+inf").Result()
+	if err != nil {
+		return 0, err
+	}
+
+	// Return jobs per second
+	return float64(count) / 60.0, nil
 }
 
 
