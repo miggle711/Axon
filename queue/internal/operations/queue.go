@@ -1,9 +1,10 @@
-package queue
+package operations
 
 import (
-	queue "axon-queue"
-	"axon-queue/internal/store"
 	"context"
+
+	jobpkg "axon-queue"
+	"axon-queue/internal/store"
 )
 
 //   Job lifecycle:                                                                                                                                                                                          
@@ -36,7 +37,7 @@ func NewQueue(jobStore store.JobStore, ops store.QueueOperations, metrics store.
 	}
 }
 
-func (q *Queue) Enqueue(ctx context.Context, job *queue.Job) error {
+func (q *Queue) Enqueue(ctx context.Context, job *jobpkg.Job) error {
 	err := q.jobStore.StoreJob(ctx, job)
 	if err != nil {
 		return err
@@ -44,7 +45,7 @@ func (q *Queue) Enqueue(ctx context.Context, job *queue.Job) error {
 	return q.ops.AddToPending(ctx, job, job.Priority)
 }
 
-func (q *Queue) Dequeue(ctx context.Context) (*queue.Job, error) {
+func (q *Queue) Dequeue(ctx context.Context) (*jobpkg.Job, error) {
 	// retrieve and remove a job from the queue using the Redis store.
 	job, err := q.ops.PopFromPending(ctx)
 	if err != nil {
