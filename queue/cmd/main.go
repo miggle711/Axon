@@ -9,22 +9,22 @@ import (
 	"time"
 
 	jobpkg "axon-queue"
+	"axon-queue/api"
 	"axon-queue/internal/operations"
 	"axon-queue/internal/store"
 )
 
-// Run with: 
-// cd queue                                                                                                                                                                         
+// Run with:
+// cd queue
 // go run ./cmd/main.go
+// go run ./cmd/main.go -mode api -port 9000
+// go run ./cmd/main.go -mode demo
 
 func main() {
 	// Define CLI flags
 	redisURL := flag.String("redis", "redis://localhost:6379", "Redis URL")
-	action := flag.String("action", "demo", "Action: demo, enqueue, dequeue, status, stats")
-	jobID := flag.String("job-id", "", "Job ID for status lookup")
-	jobType := flag.String("job-type", "email", "Job type for enqueuing")
-	jobPayload := flag.String("payload", `{"to":"user@example.com"}`, "Job payload (JSON)")
-	priority := flag.Int("priority", 1, "Job priority")
+	mode := flag.String("mode", "api", "Mode: api or demo")
+	port := flag.String("port", "8080", "Server port (only for api mode)")
 
 	flag.Parse()
 
@@ -36,29 +36,23 @@ func main() {
 
 	// Create queue with the three interface implementations
 	q := operations.NewQueue(redisStore, redisStore, redisStore)
-	ctx := context.Background()
 
-	switch *action {
+	switch *mode {
+	case "api":
+		// Start HTTP API server
+		server := api.NewServer(q)
+		log.Printf("Starting API server on port %s", *port)
+		if err := server.Start(*port); err != nil {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+
 	case "demo":
+		// Run CLI demo
+		ctx := context.Background()
 		runDemo(ctx, q)
 
-	case "enqueue":
-		enqueueJob(ctx, q, *jobType, *jobPayload, *priority)
-
-	case "dequeue":
-		dequeueJob(ctx, q)
-
-	case "status":
-		if *jobID == "" {
-			log.Fatal("--job-id required for status action")
-		}
-		getJobStatus(ctx, q, *jobID)
-
-	case "stats":
-		getStats(ctx, q)
-
 	default:
-		log.Fatalf("Unknown action: %s", *action)
+		log.Fatalf("Unknown mode: %s (use 'api' or 'demo')", *mode)
 	}
 }
 
@@ -155,65 +149,6 @@ func runDemo(ctx context.Context, q *operations.Queue) {
 
 	// 10. Final stats
 	fmt.Println("10. Final Queue Stats:")
-	printStats(ctx, q)
-}
-
-// enqueueJob enqueues a single job
-func enqueueJob(ctx context.Context, q *operations.Queue, jobType, payload string, priority int) {
-	job := &jobpkg.Job{
-		ID:         fmt.Sprintf("job-%d", time.Now().UnixNano()),
-		Type:       jobType,
-		Payload:    payload,
-		Status:     "pending",
-		Priority:   priority,
-		Retries:    0,
-		MaxRetries: 3,
-		CreatedAt:  time.Now().Unix(),
-		RunAt:      time.Now().Unix(),
-	}
-
-	if err := q.Enqueue(ctx, job); err != nil {
-		log.Fatalf("Failed to enqueue: %v", err)
-	}
-
-	fmt.Printf(" Enqueued job: %s\n", job.ID)
-	fmt.Printf("  Type: %s\n", job.Type)
-	fmt.Printf("  Priority: %d\n", job.Priority)
-	fmt.Printf("  Payload: %s\n", job.Payload)
-}
-
-// dequeueJob dequeues and prints the next job
-func dequeueJob(ctx context.Context, q *operations.Queue) {
-	job, err := q.Dequeue(ctx)
-	if err != nil {
-		log.Fatalf("Failed to dequeue: %v", err)
-	}
-
-	if job == nil {
-		fmt.Println("No jobs available in queue")
-		return
-	}
-
-	fmt.Printf(" Dequeued job: %s\n", job.ID)
-	fmt.Printf("  Type: %s\n", job.Type)
-	fmt.Printf("  Priority: %d\n", job.Priority)
-	fmt.Printf("  Status: pending → running\n")
-	fmt.Printf("  Payload: %s\n", job.Payload)
-}
-
-// getJobStatus retrieves and prints job status
-func getJobStatus(ctx context.Context, q *operations.Queue, jobID string) {
-	status, err := q.GetJobStatus(ctx, jobID)
-	if err != nil {
-		log.Fatalf("Failed to get status: %v", err)
-	}
-
-	fmt.Printf("Job: %s\n", jobID)
-	fmt.Printf("Status: %s\n", status)
-}
-
-// getStats retrieves and prints queue statistics
-func getStats(ctx context.Context, q *operations.Queue) {
 	printStats(ctx, q)
 }
 
