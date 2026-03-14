@@ -64,7 +64,7 @@ func main() {
 
 // runDemo demonstrates the complete job lifecycle
 func runDemo(ctx context.Context, q *operations.Queue) {
-	fmt.Println("=== Queue Demo ===\n")
+	fmt.Println("=== Queue Demo ===")
 
 	// 1. Enqueue jobs
 	fmt.Println("1. Enqueuing jobs...")
