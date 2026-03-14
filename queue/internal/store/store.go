@@ -72,7 +72,7 @@ func (s *RedisStore) PopFromPending(ctx context.Context) (*queue.Job, error) {
 		return nil, nil // no pending jobs available
 	}
 	jobID := id[0].Member.(string)
-	return s.GetJob(jobID) // retrieve the job details using the job ID
+	return s.GetJob(ctx, jobID) // retrieve the job details using the job ID
 }
 
 func (s *RedisStore) AddToRunning(ctx context.Context, job *queue.Job) error {
