@@ -132,8 +132,8 @@ func (s *RedisStore) GetJob(ctx context.Context, jobID string) (*queue.Job, erro
 	priority, _ := strconv.Atoi(jobMap["priority"])
 	retries, _ := strconv.Atoi(jobMap["retries"])
 	maxRetries, _ := strconv.Atoi(jobMap["max_retries"])
-	createdAt, _ := time.Parse(time.RFC3339, jobMap["created_at"])
-	runAt, _ := time.Parse(time.RFC3339, jobMap["run_at"])
+	createdAt, _ := strconv.ParseInt(jobMap["created_at"], 10, 64)
+	runAt, _ := strconv.ParseInt(jobMap["run_at"], 10, 64)
 
 	job := &queue.Job{
 		ID:         jobMap["id"],
@@ -143,8 +143,8 @@ func (s *RedisStore) GetJob(ctx context.Context, jobID string) (*queue.Job, erro
 		Priority:   priority,
 		Retries:    retries,
 		MaxRetries: maxRetries,
-		CreatedAt:  createdAt.Unix(),
-		RunAt:      runAt.Unix(),
+		CreatedAt:  createdAt,
+		RunAt:      runAt,
 	}
 	return job, nil
 }
