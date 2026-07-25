@@ -51,6 +51,8 @@ type Run struct {
 	UserInput string `json:"user_input"`
 	Status    string `json:"status"` // pending, in_progress, completed, failed
 
+	Steps []StepDefinition `json:"steps"` // snapshot of the agent's steps at run creation
+
 	StepResults   map[string]string `json:"step_results"`   // step_id > output
 	EnqueuedSteps map[string]string `json:"enqueued_steps"` // step_id > job_id or "run:<child_run_id>"
 
