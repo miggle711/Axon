@@ -44,3 +44,19 @@ func (s *Server) getRunHandler(c *gin.Context) {
 
 	c.JSON(200, run)
 }
+
+func (s *Server) createRunHandler(c *gin.Context) {
+	var request CreateRunRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(400, ErrorResponse{Error: "Invalid request body", Code: 400})
+		return
+	}
+
+	run, err := s.orchestrator.CreateRun(c.Request.Context(), request.Definition, request.Input)
+	if err != nil {
+		c.JSON(500, ErrorResponse{Error: "Failed to create run", Code: 500})
+		return
+	}
+
+	c.JSON(201, run)
+}
