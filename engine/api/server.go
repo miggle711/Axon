@@ -27,6 +27,7 @@ func (s *Server) setupRoutes() {
 	// define all HTTP endpoints
 	s.router.POST("/webhook/complete", s.webhookCompleteHandler)
 	s.router.GET("/runs/:id", s.getRunHandler)
+	s.router.POST("/runs", s.createRunHandler)
 }
 
 // Start runs the HTTP server on the given port
