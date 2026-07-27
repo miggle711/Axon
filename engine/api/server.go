@@ -1,25 +1,25 @@
 package api
 
 import (
-	"github.com/gin-gonic/gin"
 	engine "axon-engine"
+	"github.com/gin-gonic/gin"
 )
 
 type Server struct {
-	router *gin.Engine
+	router       *gin.Engine
 	orchestrator *engine.Orchestrator
 }
 
 func NewServer(orchestrator *engine.Orchestrator) *Server {
 	router := gin.Default()
 	server := &Server{
-		router: router,
+		router:       router,
 		orchestrator: orchestrator,
 	}
 
 	// Define all routes
 	server.setupRoutes()
-	
+
 	return server
 }
 
@@ -32,6 +32,4 @@ func (s *Server) setupRoutes() {
 // Start runs the HTTP server on the given port
 func (s *Server) Start(port string) error {
 	return s.router.Run(":" + port)
-}	
-	
-
+}
