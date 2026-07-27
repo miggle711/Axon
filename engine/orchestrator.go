@@ -109,6 +109,11 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 	return run, nil
 }
 
+// GetRun fetches a run's current state by ID.
+func (orchestrator *Orchestrator) GetRun(ctx context.Context, runID string) (*Run, error) {
+	return orchestrator.store.GetRun(ctx, runID)
+}
+
 func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload WebhookPayload) error {
 	// Retrieve the run from the store
 	run, err := orchestrator.store.GetRun(ctx, payload.RunID)
