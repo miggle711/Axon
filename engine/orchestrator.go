@@ -30,6 +30,13 @@ func canEnqueueStep(step StepDefinition, run *Run) bool {
 		return false
 	}
 
+	// Check if the step has been skipped (e.g. the losing branch of a conditional)
+	for _, skippedID := range run.SkippedSteps {
+		if skippedID == step.ID {
+			return false
+		}
+	}
+
 	// Check if all dependencies of the step are completed
 	for _, depID := range step.DependsOn {
 		if _, completed := run.StepResults[depID]; !completed {
