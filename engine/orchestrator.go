@@ -161,3 +161,26 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 
 	return nil
 }
+
+// evaluateCondition resolves condition's template placeholders and
+// evaluates a single == or != comparison, e.g. "{{step_1.output}} == success".
+// Values are compared as bare, unquoted strings and quotes are treated as literal characters, not stripped.
+func evaluateCondition(condition string, run *Run) (bool, error) {
+	resolvedCondition := resolveTemplate(condition, run)
+
+	// split on the first occurrence of "==" or "!=" to separate the left and right sides of the condition
+	var left, right string
+	if strings.Contains(resolvedCondition, "==") {
+		parts := strings.SplitN(resolvedCondition, "==", 2)
+		left = strings.TrimSpace(parts[0])
+		right = strings.TrimSpace(parts[1])
+		return left == right, nil
+	} else if strings.Contains(resolvedCondition, "!=") {
+		parts := strings.SplitN(resolvedCondition, "!=", 2)
+		left = strings.TrimSpace(parts[0])
+		right = strings.TrimSpace(parts[1])
+		return left != right, nil
+	}
+
+	return false, fmt.Errorf("unsupported condition format: %s", condition)
+}
