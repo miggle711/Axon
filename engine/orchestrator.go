@@ -152,6 +152,8 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 		run.Status = "in_progress"
 	}
 
+	run.UpdatedAt = time.Now()
+
 	// Save the updated run back to the store
 	if err := orchestrator.store.SaveRun(ctx, run); err != nil {
 		return fmt.Errorf("failed to save updated run: %v", err)
