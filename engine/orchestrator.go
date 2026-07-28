@@ -184,3 +184,36 @@ func evaluateCondition(condition string, run *Run) (bool, error) {
 
 	return false, fmt.Errorf("unsupported condition format: %s", condition)
 }
+
+// findTransitiveDependents returns a list of step IDs that are
+// transitively dependent on the given stepID. It repeatedly scans
+// steps, growing the skipped set until a full pass finds nothing new
+// Currently O(N^2) but N is expected to be small.
+func findTransitiveDependents(stepID string, steps []StepDefinition) []string {
+	skipped := map[string]bool{stepID: true}
+	for {
+		changed := false
+		for _, step := range steps {
+			if skipped[step.ID] {
+				continue
+			}
+			for _, dep := range step.DependsOn {
+				if skipped[dep] {
+					skipped[step.ID] = true
+					changed = true
+					break
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+
+	delete(skipped, stepID)
+	result := make([]string, 0, len(skipped))
+	for id := range skipped {
+		result = append(result, id)
+	}
+	return result
+}
