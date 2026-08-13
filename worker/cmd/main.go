@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -66,8 +67,11 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		return
 	}
 
-	// Run the stub tool
-	output := payload.Input
+	output, err := runStep(ctx, job.Type, payload)
+	if err != nil {
+		log.Printf("failed to run step %s: %v", payload.StepID, err)
+		return
+	}
 
 	// Ack the job with the queue
 	ackReq, err := http.NewRequestWithContext(ctx, http.MethodPost, queueURL+"/jobs/"+job.ID+"/ack", nil)
@@ -108,4 +112,18 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	_ = webhookResp.Body.Close()
 
 	log.Printf("processed step %s for run %s", payload.StepID, payload.RunID)
+}
+
+// runStep executes payload according to jobType, returning the step's
+// output. tool_call runs the echo stub; llm_call is a placeholder
+// until a real LLM client is wired in (see #26).
+func runStep(ctx context.Context, jobType string, payload worker.StepPayload) (string, error) {
+	switch jobType {
+	case worker.JobTypeLLMCall:
+		return "[llm_call stub] " + payload.Input, nil
+	case worker.JobTypeToolCall:
+		return payload.Input, nil
+	default:
+		return "", fmt.Errorf("unsupported job type: %s", jobType)
+	}
 }
