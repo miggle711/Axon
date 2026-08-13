@@ -41,7 +41,7 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		time.Sleep(time.Second)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNoContent {
 		time.Sleep(time.Second) // nothing pending, wait before polling again
@@ -80,7 +80,7 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		log.Printf("failed to ack job: %v", err)
 		return
 	}
-	ackResp.Body.Close()
+	_ = ackResp.Body.Close()
 
 	// Notify the engine that the step completed
 	webhookPayload := worker.WebhookPayload{
@@ -105,7 +105,7 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		log.Printf("failed to notify engine: %v", err)
 		return
 	}
-	webhookResp.Body.Close()
+	_ = webhookResp.Body.Close()
 
 	log.Printf("processed step %s for run %s", payload.StepID, payload.RunID)
 }

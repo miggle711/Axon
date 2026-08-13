@@ -41,7 +41,7 @@ func newFakeQueueServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		counter++
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"id": "job-" + string(rune('0'+counter))})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "job-" + string(rune('0'+counter))})
 	}))
 }
 

@@ -64,7 +64,7 @@ func (c *QueueClient) Enqueue(ctx context.Context, stepType StepType, payload St
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close() // Ensure the response body is closed to prevent resource leaks
+	defer func() { _ = resp.Body.Close() }() // Ensure the response body is closed to prevent resource leaks
 
 	// Check if the response status code indicates success
 	if resp.StatusCode != http.StatusCreated {
