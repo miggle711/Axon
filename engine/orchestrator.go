@@ -30,6 +30,15 @@ func canEnqueueStep(step StepDefinition, run *Run) bool {
 		return false
 	}
 
+	// Check if the step has already completed. Conditionals resolve
+	// inline and are never added to EnqueuedSteps, so without this
+	// check a completed conditional would be re-evaluated forever.
+	for _, completedID := range run.CompletedSteps {
+		if completedID == step.ID {
+			return false
+		}
+	}
+
 	// Check if the step has been skipped (e.g. the losing branch of a conditional)
 	for _, skippedID := range run.SkippedSteps {
 		if skippedID == step.ID {
@@ -88,9 +97,41 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 		UpdatedAt:            time.Now(),
 	}
 
-	// Enqueue the initial steps of the workflow that have no dependencies
-	for _, step := range definition.Steps {
-		if canEnqueueStep(step, run) {
+	// Enqueue the initial steps of the workflow that have no
+	// dependencies (or, for conditionals, resolve them). Repeats
+	// until a full pass makes no further progress, matching
+	// OnStepCompleted's loop.
+	for {
+		changed := false
+		for _, step := range definition.Steps {
+			if !canEnqueueStep(step, run) {
+				continue
+			}
+
+			if step.Type == StepTypeConditional {
+				result, err := evaluateCondition(step.Condition, run)
+				if err != nil {
+					return nil, fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
+				}
+
+				winner, loser := step.OnFalse, step.OnTrue
+				if result {
+					winner, loser = step.OnTrue, step.OnFalse
+				}
+
+				// winner may be "" if that branch intentionally does nothing
+				run.StepResults[step.ID] = winner
+				run.CompletedSteps = append(run.CompletedSteps, step.ID)
+
+				if loser != "" {
+					run.SkippedSteps = append(run.SkippedSteps, loser)
+					run.SkippedSteps = append(run.SkippedSteps, findTransitiveDependents(loser, definition.Steps)...)
+				}
+
+				changed = true
+				continue
+			}
+
 			// Enqueue the step and update the run's EnqueuedSteps map
 			jobID, err := orchestrator.queueClient.Enqueue(
 				ctx,
@@ -105,6 +146,10 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 				return nil, fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
 			}
 			run.EnqueuedSteps[step.ID] = jobID
+			changed = true
+		}
+		if !changed {
+			break
 		}
 	}
 
@@ -132,9 +177,41 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 	run.StepResults[payload.StepID] = payload.Output
 	run.CompletedSteps = append(run.CompletedSteps, payload.StepID)
 
-	// Check if any dependent steps can now be enqueued
-	for _, step := range run.Steps {
-		if canEnqueueStep(step, run) {
+	// Check if any dependent steps can now be enqueued or, for
+	// conditionals, resolved. Repeats until a full pass makes no
+	// further progress, since resolving a conditional can unblock a
+	// step earlier in run.Steps within the same pass.
+	for {
+		changed := false
+		for _, step := range run.Steps {
+			if !canEnqueueStep(step, run) {
+				continue
+			}
+
+			if step.Type == StepTypeConditional {
+				result, err := evaluateCondition(step.Condition, run)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
+				}
+
+				winner, loser := step.OnFalse, step.OnTrue
+				if result {
+					winner, loser = step.OnTrue, step.OnFalse
+				}
+
+				// winner may be "" if that branch intentionally does nothing
+				run.StepResults[step.ID] = winner
+				run.CompletedSteps = append(run.CompletedSteps, step.ID)
+
+				if loser != "" {
+					run.SkippedSteps = append(run.SkippedSteps, loser)
+					run.SkippedSteps = append(run.SkippedSteps, findTransitiveDependents(loser, run.Steps)...)
+				}
+
+				changed = true
+				continue
+			}
+
 			// Enqueue the step and update the run's EnqueuedSteps map
 			jobID, err := orchestrator.queueClient.Enqueue(
 				ctx,
@@ -149,11 +226,17 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 				return fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
 			}
 			run.EnqueuedSteps[step.ID] = jobID
+			changed = true
+		}
+		if !changed {
+			break
 		}
 	}
 
-	// Update the run's status based on the completion of steps
-	if len(run.CompletedSteps) == len(run.Steps) {
+	// Update the run's status based on the completion of steps.
+	// SkippedSteps count toward completion since a skipped step will
+	// never itself complete.
+	if len(run.CompletedSteps)+len(run.SkippedSteps) == len(run.Steps) {
 		run.Status = "completed"
 	} else {
 		run.Status = "in_progress"

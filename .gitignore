@@ -212,4 +212,7 @@ queue/queue-cli
 # Local docs and tutorial code
 *.md
 !README.md
+
+# Local Redis dump from running services during manual testing
+dump.rdb
 tutorial/
