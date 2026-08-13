@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	uuid "github.com/google/uuid"
@@ -12,13 +13,29 @@ import (
 type Orchestrator struct {
 	store       RunStore
 	queueClient *QueueClient
+
+	// runLocks holds one mutex per run ID, serializing
+	// OnStepCompleted per run. Process-local only.
+	runLocksMu sync.Mutex
+	runLocks   map[string]*sync.Mutex
 }
 
 func NewOrchestrator(store RunStore, queueClient *QueueClient) *Orchestrator {
 	return &Orchestrator{
 		store:       store,
 		queueClient: queueClient,
+		runLocks:    make(map[string]*sync.Mutex),
 	}
+}
+
+// lockFor returns the mutex for runID, creating one on first use.
+func (orchestrator *Orchestrator) lockFor(runID string) *sync.Mutex {
+	orchestrator.runLocksMu.Lock()
+	defer orchestrator.runLocksMu.Unlock()
+	if orchestrator.runLocks[runID] == nil {
+		orchestrator.runLocks[runID] = &sync.Mutex{}
+	}
+	return orchestrator.runLocks[runID]
 }
 
 // canEnqueueStep reports whether step is ready to run: it has not
@@ -167,6 +184,10 @@ func (orchestrator *Orchestrator) GetRun(ctx context.Context, runID string) (*Ru
 }
 
 func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload WebhookPayload) error {
+	lock := orchestrator.lockFor(payload.RunID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	// Retrieve the run from the store
 	run, err := orchestrator.store.GetRun(ctx, payload.RunID)
 	if err != nil {

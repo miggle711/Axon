@@ -20,17 +20,38 @@ func newFakeRunStore() *fakeRunStore {
 	return &fakeRunStore{runs: make(map[string]*Run)}
 }
 
+// SaveRun/GetRun round-trip through JSON, same as RedisRunStore, so
+// each GetRun returns an independent copy — matching real behavior
+// closely enough to reproduce the read-modify-write race a shared
+// pointer would mask.
 func (s *fakeRunStore) SaveRun(ctx context.Context, run *Run) error {
+	data, err := json.Marshal(run)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.runs[run.ID] = run
-	return nil
+	s.runs[run.ID] = &Run{}
+	return json.Unmarshal(data, s.runs[run.ID])
 }
 
 func (s *fakeRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.runs[runID], nil
+	stored, ok := s.runs[runID]
+	s.mu.Unlock()
+	if !ok {
+		return nil, nil
+	}
+
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return nil, err
+	}
+	var run Run
+	if err := json.Unmarshal(data, &run); err != nil {
+		return nil, err
+	}
+	return &run, nil
 }
 
 // newFakeQueueServer stands in for the queue service's POST /jobs
@@ -228,5 +249,66 @@ func TestFindTransitiveDependents(t *testing.T) {
 		if !want[id] {
 			t.Errorf("unexpected step %q in transitive dependents", id)
 		}
+	}
+}
+
+// TestOnStepCompleted_ConcurrentCallsDoNotLoseUpdates reproduces
+// issue #19: two OnStepCompleted calls for the same run, fired
+// concurrently, must not clobber each other's StepResults update via
+// an unsynchronized read-modify-write.
+func TestOnStepCompleted_ConcurrentCallsDoNotLoseUpdates(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL))
+
+	agent := AgentDefinition{
+		Name: "concurrent_test_agent",
+		Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeToolCall, Tool: "echo", DependsOn: []string{}},
+			{ID: "step_2", Type: StepTypeToolCall, Tool: "echo", DependsOn: []string{}},
+		},
+	}
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{
+			RunID: run.ID, StepID: "step_1", Output: "result_1",
+		}); err != nil {
+			t.Errorf("OnStepCompleted(step_1) failed: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{
+			RunID: run.ID, StepID: "step_2", Output: "result_2",
+		}); err != nil {
+			t.Errorf("OnStepCompleted(step_2) failed: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	final, err := orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+
+	if final.StepResults["step_1"] != "result_1" {
+		t.Errorf("step_1 result lost: got %q, want %q", final.StepResults["step_1"], "result_1")
+	}
+	if final.StepResults["step_2"] != "result_2" {
+		t.Errorf("step_2 result lost: got %q, want %q", final.StepResults["step_2"], "result_2")
+	}
+	if final.Status != "completed" {
+		t.Errorf("expected run status 'completed', got %q (completed=%v)", final.Status, final.CompletedSteps)
 	}
 }
