@@ -13,6 +13,7 @@ import (
 type Orchestrator struct {
 	store       RunStore
 	queueClient *QueueClient
+	agents      AgentRegistry
 
 	// runLocks holds one mutex per run ID, serializing
 	// OnStepCompleted per run. Process-local only.
@@ -20,10 +21,11 @@ type Orchestrator struct {
 	runLocks   map[string]*sync.Mutex
 }
 
-func NewOrchestrator(store RunStore, queueClient *QueueClient) *Orchestrator {
+func NewOrchestrator(store RunStore, queueClient *QueueClient, agents AgentRegistry) *Orchestrator {
 	return &Orchestrator{
 		store:       store,
 		queueClient: queueClient,
+		agents:      agents,
 		runLocks:    make(map[string]*sync.Mutex),
 	}
 }
@@ -100,6 +102,13 @@ func resolveStepInput(step StepDefinition, run *Run) string {
 // CreateRun initializes a new Run instance based on the provided AgentDefinition and user input.
 // It also sets the ID for the run
 func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition AgentDefinition, userInput string) (*Run, error) {
+	return orchestrator.createRun(ctx, definition, userInput, "", "")
+}
+
+// createRun is CreateRun's implementation, additionally accepting
+// parentRunID/parentStepID so agent_call can spawn a child run that
+// knows where to propagate its completion back to.
+func (orchestrator *Orchestrator) createRun(ctx context.Context, definition AgentDefinition, userInput string, parentRunID, parentStepID string) (*Run, error) {
 
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -118,8 +127,8 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 		CompletedSteps:       []string{},
 		FailedSteps:          []string{},
 		SkippedSteps:         []string{},
-		ParentRunID:          "", // No parent run for the initial run
-		ParentStepID:         "", // No parent step for the initial run
+		ParentRunID:          parentRunID,
+		ParentStepID:         parentStepID,
 		SupervisorIterations: make(map[string]int),
 		CreatedAt:            time.Now(),
 		UpdatedAt:            time.Now(),
@@ -160,6 +169,16 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 				continue
 			}
 
+			if step.Type == StepTypeAgentCall {
+				childRun, err := orchestrator.spawnChildRun(ctx, step, run)
+				if err != nil {
+					return nil, fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
+				}
+				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
+				changed = true
+				continue
+			}
+
 			// Enqueue the step and update the run's EnqueuedSteps map
 			jobID, err := orchestrator.queueClient.Enqueue(
 				ctx,
@@ -187,6 +206,36 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 	}
 
 	return run, nil
+}
+
+// spawnChildRun resolves step's Agent name via the registry and starts
+// a child run for it, with parent.ID/step.ID as the child's
+// ParentRunID/ParentStepID so its completion can propagate back.
+func (orchestrator *Orchestrator) spawnChildRun(ctx context.Context, step StepDefinition, parent *Run) (*Run, error) {
+	if orchestrator.agents == nil {
+		return nil, fmt.Errorf("no agent registry configured")
+	}
+
+	childDef, ok := orchestrator.agents.Get(step.Agent)
+	if !ok {
+		return nil, fmt.Errorf("unknown agent %q", step.Agent)
+	}
+
+	if childDef.OutputStep == "" {
+		return nil, fmt.Errorf("agent %q has no output_step set, required to be called via agent_call", step.Agent)
+	}
+	hasOutputStep := false
+	for _, s := range childDef.Steps {
+		if s.ID == childDef.OutputStep {
+			hasOutputStep = true
+			break
+		}
+	}
+	if !hasOutputStep {
+		return nil, fmt.Errorf("agent %q's output_step %q does not match any step ID", step.Agent, childDef.OutputStep)
+	}
+
+	return orchestrator.createRun(ctx, childDef, resolveStepInput(step, parent), parent.ID, step.ID)
 }
 
 // GetRun fetches a run's current state by ID.
@@ -244,6 +293,16 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 				continue
 			}
 
+			if step.Type == StepTypeAgentCall {
+				childRun, err := orchestrator.spawnChildRun(ctx, step, run)
+				if err != nil {
+					return fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
+				}
+				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
+				changed = true
+				continue
+			}
+
 			// Enqueue the step and update the run's EnqueuedSteps map
 			jobID, err := orchestrator.queueClient.Enqueue(
 				ctx,
@@ -279,6 +338,23 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 	// Save the updated run back to the store
 	if err := orchestrator.store.SaveRun(ctx, run); err != nil {
 		return fmt.Errorf("failed to save updated run: %v", err)
+	}
+
+	// If this run was spawned by an agent_call step and has now
+	// completed, propagate its designated output step's result back to
+	// unblock the parent run's ParentStepID. Uses this run's own
+	// AgentDefinition.OutputStep, which was already validated to exist
+	// in spawnChildRun before this run was created.
+	if run.Status == "completed" && run.ParentRunID != "" {
+		agentDef, ok := orchestrator.agents.Get(run.AgentName)
+		if !ok {
+			return fmt.Errorf("failed to propagate child run %s completion: unknown agent %q", run.ID, run.AgentName)
+		}
+		return orchestrator.OnStepCompleted(ctx, WebhookPayload{
+			RunID:  run.ParentRunID,
+			StepID: run.ParentStepID,
+			Output: run.StepResults[agentDef.OutputStep],
+		})
 	}
 
 	return nil
