@@ -285,12 +285,21 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 }
 
 // evaluateCondition resolves condition's template placeholders and
-// evaluates a single == or != comparison, e.g. "{{step_1.output}} == success".
+// evaluates a single ==, !=, or contains comparison, e.g.
+// "{{step_1.output}} == success" or "{{step_1.output}} contains success".
 // Values are compared as bare, unquoted strings and quotes are treated as literal characters, not stripped.
+//
+// == and != require an exact match, which is reliable for tool_call
+// output but brittle against free-form llm_call output (e.g. an LLM
+// saying "Yes, that worked." instead of "success"). contains checks
+// for a substring instead. Prefer instructing the llm_call's prompt to
+// answer in a fixed vocabulary (e.g. "respond with exactly one word:
+// success or failure") over relying on contains, since contains still
+// only matches phrasing that happens to include the target word.
 func evaluateCondition(condition string, run *Run) (bool, error) {
 	resolvedCondition := resolveTemplate(condition, run)
 
-	// split on the first occurrence of "==" or "!=" to separate the left and right sides of the condition
+	// split on the first occurrence of "==", "!=", or "contains" to separate the left and right sides of the condition
 	var left, right string
 	if strings.Contains(resolvedCondition, "==") {
 		parts := strings.SplitN(resolvedCondition, "==", 2)
@@ -302,6 +311,11 @@ func evaluateCondition(condition string, run *Run) (bool, error) {
 		left = strings.TrimSpace(parts[0])
 		right = strings.TrimSpace(parts[1])
 		return left != right, nil
+	} else if strings.Contains(resolvedCondition, " contains ") {
+		parts := strings.SplitN(resolvedCondition, " contains ", 2)
+		left = strings.TrimSpace(parts[0])
+		right = strings.TrimSpace(parts[1])
+		return strings.Contains(left, right), nil
 	}
 
 	return false, fmt.Errorf("unsupported condition format: %s", condition)
