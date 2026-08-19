@@ -256,6 +256,24 @@ func TestEvaluateCondition_FreeFormLLMOutput(t *testing.T) {
 	}
 }
 
+// TestEvaluateCondition_OperatorInResolvedValue is the regression case from
+// #30: an operator-like substring inside the *resolved* value (e.g. llm_call
+// output containing "!=") must not be mistaken for the condition's actual
+// operator. The operator must be found in the unresolved condition string.
+func TestEvaluateCondition_OperatorInResolvedValue(t *testing.T) {
+	run := &Run{
+		StepResults: map[string]string{"step": "the tool failed, output != expected"},
+	}
+
+	got, err := evaluateCondition("{{step.output}} contains worked", run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false: resolved value has no \"worked\" substring, but a stray \"!=\" in the value must not hijack the split")
+	}
+}
+
 func TestFindTransitiveDependents(t *testing.T) {
 	steps := []StepDefinition{
 		{ID: "a", DependsOn: []string{}},

@@ -297,28 +297,33 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 // success or failure") over relying on contains, since contains still
 // only matches phrasing that happens to include the target word.
 func evaluateCondition(condition string, run *Run) (bool, error) {
-	resolvedCondition := resolveTemplate(condition, run)
-
-	// split on the first occurrence of "==", "!=", or "contains" to separate the left and right sides of the condition
-	var left, right string
-	if strings.Contains(resolvedCondition, "==") {
-		parts := strings.SplitN(resolvedCondition, "==", 2)
-		left = strings.TrimSpace(parts[0])
-		right = strings.TrimSpace(parts[1])
-		return left == right, nil
-	} else if strings.Contains(resolvedCondition, "!=") {
-		parts := strings.SplitN(resolvedCondition, "!=", 2)
-		left = strings.TrimSpace(parts[0])
-		right = strings.TrimSpace(parts[1])
-		return left != right, nil
-	} else if strings.Contains(resolvedCondition, " contains ") {
-		parts := strings.SplitN(resolvedCondition, " contains ", 2)
-		left = strings.TrimSpace(parts[0])
-		right = strings.TrimSpace(parts[1])
-		return strings.Contains(left, right), nil
+	// Find the operator and split into operands *before* resolving template
+	// placeholders, so an operator-like substring inside a resolved value
+	// (e.g. llm_call output containing "!=" or "contains") can never be
+	// mistaken for the condition's actual operator (#30).
+	var rawLeft, rawRight string
+	var op string
+	if idx := strings.Index(condition, "=="); idx != -1 {
+		op, rawLeft, rawRight = "==", condition[:idx], condition[idx+len("=="):]
+	} else if idx := strings.Index(condition, "!="); idx != -1 {
+		op, rawLeft, rawRight = "!=", condition[:idx], condition[idx+len("!="):]
+	} else if idx := strings.Index(condition, " contains "); idx != -1 {
+		op, rawLeft, rawRight = "contains", condition[:idx], condition[idx+len(" contains "):]
+	} else {
+		return false, fmt.Errorf("unsupported condition format: %s", condition)
 	}
 
-	return false, fmt.Errorf("unsupported condition format: %s", condition)
+	left := strings.TrimSpace(resolveTemplate(rawLeft, run))
+	right := strings.TrimSpace(resolveTemplate(rawRight, run))
+
+	switch op {
+	case "==":
+		return left == right, nil
+	case "!=":
+		return left != right, nil
+	default: // contains
+		return strings.Contains(left, right), nil
+	}
 }
 
 // findTransitiveDependents returns a list of step IDs that are
