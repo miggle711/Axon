@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	worker "axon-worker"
+	"axon-worker/llm"
 )
 
 func main() {
@@ -19,17 +21,29 @@ func main() {
 	// Parse command-line flags for the queue and engine service URLs
 	queueURL := flag.String("queue", "http://localhost:8080", "Queue service URL")
 	engineURL := flag.String("engine", "http://localhost:8000", "Engine service URL")
+	groqModel := flag.String("model", "openai/gpt-oss-120b", "Groq model to use for llm_call steps")
 	flag.Parse()
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 
+	runners := map[string]StepRunner{
+		worker.JobTypeToolCall: runToolCall,
+	}
+
+	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
+		groqClient := llm.NewGroqClient(apiKey, *groqModel, httpClient)
+		runners[worker.JobTypeLLMCall] = newLLMRunner(groqClient)
+	} else {
+		log.Printf("GROQ_API_KEY not set: llm_call jobs will be nacked until it is provided")
+	}
+
 	for {
-		pollOnce(ctx, httpClient, *queueURL, *engineURL)
+		pollOnce(ctx, httpClient, *queueURL, *engineURL, runners)
 	}
 
 }
 
-func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL string) {
+func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL string, runners map[string]StepRunner) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queueURL+"/jobs/next", nil)
 	if err != nil {
 		log.Printf("failed to build request: %v", err)
@@ -67,7 +81,15 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		return
 	}
 
-	output, err := runStep(ctx, job.Type, payload)
+	runner, ok := runners[job.Type]
+	if !ok {
+		reason := fmt.Sprintf("unsupported job type: %s", job.Type)
+		log.Printf("failed to run step %s: %s", payload.StepID, reason)
+		nackJob(ctx, httpClient, queueURL, job.ID, reason)
+		return
+	}
+
+	output, err := runner(ctx, payload)
 	if err != nil {
 		log.Printf("failed to run step %s: %v", payload.StepID, err)
 		nackJob(ctx, httpClient, queueURL, job.ID, err.Error())
@@ -139,16 +161,23 @@ func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reas
 	_ = nackResp.Body.Close()
 }
 
-// runStep executes payload according to jobType, returning the step's
-// output. tool_call runs the echo stub; llm_call is a placeholder
-// until a real LLM client is wired in (see #26).
-func runStep(ctx context.Context, jobType string, payload worker.StepPayload) (string, error) {
-	switch jobType {
-	case worker.JobTypeLLMCall:
-		return "[llm_call stub] " + payload.Input, nil
-	case worker.JobTypeToolCall:
-		return payload.Input, nil
-	default:
-		return "", fmt.Errorf("unsupported job type: %s", jobType)
+// StepRunner executes a step's payload and returns its output. Each job
+// type registered in main's runners map has one of these.
+type StepRunner func(ctx context.Context, payload worker.StepPayload) (string, error)
+
+// runToolCall is the tool_call stub: it echoes the input back as output.
+func runToolCall(ctx context.Context, payload worker.StepPayload) (string, error) {
+	return payload.Input, nil
+}
+
+// newLLMRunner returns a StepRunner that sends payload.Input (the resolved
+// prompt template) to client and returns its completion as the step output.
+func newLLMRunner(client llm.Client) StepRunner {
+	return func(ctx context.Context, payload worker.StepPayload) (string, error) {
+		output, err := client.Complete(ctx, payload.Input)
+		if err != nil {
+			return "", fmt.Errorf("llm_call: %w", err)
+		}
+		return output, nil
 	}
 }
