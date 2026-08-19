@@ -42,6 +42,11 @@ type AgentDefinition struct {
 	Name        string           `json:"name"`
 	Description string           `json:"description"`
 	Steps       []StepDefinition `json:"steps"`
+
+	// OutputStep names the step whose result becomes this agent's
+	// output when it's spawned as a child run via an agent_call step.
+	// Only required for agents used as sub-agents.
+	OutputStep string `json:"output_step,omitempty"`
 }
 
 // the execution state of a workflow run (session)

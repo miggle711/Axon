@@ -110,7 +110,7 @@ func TestOnStepCompleted_ConditionalRouting(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL))
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
 
 	agent := AgentDefinition{
 		Name:  "conditional_test_agent",
@@ -189,6 +189,139 @@ func TestOnStepCompleted_ConditionalRouting(t *testing.T) {
 		t.Errorf("expected run status 'completed', got %q (completed=%v skipped=%v steps=%d)",
 			run.Status, run.CompletedSteps, run.SkippedSteps, len(run.Steps))
 	}
+}
+
+// TestAgentCall_SpawnsChildRunAndPropagatesCompletion covers #16's
+// "done when" criteria for agent_call: a parent run with an agent_call
+// step spawns a child run, and the child's completion correctly
+// unblocks the parent's next step.
+func TestAgentCall_SpawnsChildRunAndPropagatesCompletion(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+
+	childAgent := AgentDefinition{
+		Name:       "child_agent",
+		OutputStep: "child_step",
+		Steps: []StepDefinition{
+			{ID: "child_step", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "child output", DependsOn: []string{}},
+		},
+	}
+	registry := MapAgentRegistry{"child_agent": childAgent}
+
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry)
+
+	parentAgent := AgentDefinition{
+		Name: "parent_agent",
+		Steps: []StepDefinition{
+			{ID: "call_child", Type: StepTypeAgentCall, Agent: "child_agent", DependsOn: []string{}},
+			{ID: "after_child", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "{{call_child.output}}", DependsOn: []string{"call_child"}},
+		},
+	}
+
+	ctx := context.Background()
+	parentRun, err := orchestrator.CreateRun(ctx, parentAgent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	enqueuedRef, ok := parentRun.EnqueuedSteps["call_child"]
+	if !ok || len(enqueuedRef) < 4 || enqueuedRef[:4] != "run:" {
+		t.Fatalf("expected call_child to be marked with a child run reference, got %q", enqueuedRef)
+	}
+	childRunID := enqueuedRef[4:]
+
+	childRun, err := orchestrator.GetRun(ctx, childRunID)
+	if err != nil {
+		t.Fatalf("GetRun(child) failed: %v", err)
+	}
+	if childRun == nil {
+		t.Fatal("expected child run to exist in the store")
+	}
+	if childRun.ParentRunID != parentRun.ID || childRun.ParentStepID != "call_child" {
+		t.Errorf("expected child run's parent fields to point back to the parent, got ParentRunID=%q ParentStepID=%q",
+			childRun.ParentRunID, childRun.ParentStepID)
+	}
+	if _, enqueued := childRun.EnqueuedSteps["child_step"]; !enqueued {
+		t.Fatalf("expected child_step to be enqueued in the child run, got EnqueuedSteps=%v", childRun.EnqueuedSteps)
+	}
+
+	// Simulate the worker completing the child run's only step.
+	err = orchestrator.OnStepCompleted(ctx, WebhookPayload{
+		RunID:  childRun.ID,
+		StepID: "child_step",
+		Output: "child output",
+	})
+	if err != nil {
+		t.Fatalf("OnStepCompleted(child_step) failed: %v", err)
+	}
+
+	childRun, err = orchestrator.GetRun(ctx, childRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(child) failed: %v", err)
+	}
+	if childRun.Status != "completed" {
+		t.Fatalf("expected child run to be completed, got %q", childRun.Status)
+	}
+
+	// The child's completion should have propagated back to the parent,
+	// resolving call_child's result and enqueuing after_child.
+	parentRun, err = orchestrator.GetRun(ctx, parentRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(parent) failed: %v", err)
+	}
+	if parentRun.StepResults["call_child"] != "child output" {
+		t.Errorf("expected call_child result 'child output', got %q", parentRun.StepResults["call_child"])
+	}
+	if _, enqueued := parentRun.EnqueuedSteps["after_child"]; !enqueued {
+		t.Errorf("expected after_child to be enqueued after child run completion, got EnqueuedSteps=%v", parentRun.EnqueuedSteps)
+	}
+}
+
+func TestAgentCall_ErrorCases(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	agentCallStep := func() []StepDefinition {
+		return []StepDefinition{
+			{ID: "call_child", Type: StepTypeAgentCall, Agent: "child_agent", DependsOn: []string{}},
+		}
+	}
+
+	t.Run("unknown agent", func(t *testing.T) {
+		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{})
+		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
+		if err == nil {
+			t.Fatal("expected an error for an unregistered agent, got none")
+		}
+	})
+
+	t.Run("missing output_step", func(t *testing.T) {
+		registry := MapAgentRegistry{"child_agent": AgentDefinition{
+			Name:  "child_agent",
+			Steps: []StepDefinition{{ID: "child_step", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}}},
+			// OutputStep intentionally unset
+		}}
+		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry)
+		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
+		if err == nil {
+			t.Fatal("expected an error for a child agent with no output_step, got none")
+		}
+	})
+
+	t.Run("output_step does not match any step ID", func(t *testing.T) {
+		registry := MapAgentRegistry{"child_agent": AgentDefinition{
+			Name:       "child_agent",
+			OutputStep: "does_not_exist",
+			Steps:      []StepDefinition{{ID: "child_step", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}}},
+		}}
+		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry)
+		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
+		if err == nil {
+			t.Fatal("expected an error for an output_step that doesn't match any step ID, got none")
+		}
+	})
 }
 
 func TestEvaluateCondition(t *testing.T) {
@@ -305,7 +438,7 @@ func TestOnStepCompleted_ConcurrentCallsDoNotLoseUpdates(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL))
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
 
 	agent := AgentDefinition{
 		Name: "concurrent_test_agent",

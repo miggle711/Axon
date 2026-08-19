@@ -21,7 +21,11 @@ func main() {
 	}
 
 	queueClient := engine.NewQueueClient(*queueURL)
-	orchestrator := engine.NewOrchestrator(store, queueClient)
+	// No agent-loading mechanism exists yet, so the registry starts
+	// empty; agent_call steps will fail with "unknown agent" until one
+	// is registered here.
+	agents := engine.MapAgentRegistry{}
+	orchestrator := engine.NewOrchestrator(store, queueClient, agents)
 
 	// Create the API server
 	server := api.NewServer(orchestrator)
