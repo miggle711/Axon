@@ -2,32 +2,49 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	worker "axon-worker"
 )
 
-func TestRunStep(t *testing.T) {
+func TestRunToolCall(t *testing.T) {
 	ctx := context.Background()
 	payload := worker.StepPayload{Input: "hello"}
 
-	toolOutput, err := runStep(ctx, worker.JobTypeToolCall, payload)
+	output, err := runToolCall(ctx, payload)
 	if err != nil {
-		t.Fatalf("tool_call: unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if toolOutput != "hello" {
-		t.Errorf("tool_call: got %q, want %q", toolOutput, "hello")
+	if output != "hello" {
+		t.Errorf("got %q, want %q", output, "hello")
+	}
+}
+
+type fakeLLMClient struct {
+	output string
+	err    error
+}
+
+func (f *fakeLLMClient) Complete(ctx context.Context, prompt string) (string, error) {
+	return f.output, f.err
+}
+
+func TestLLMRunner(t *testing.T) {
+	ctx := context.Background()
+	payload := worker.StepPayload{Input: "prompt"}
+
+	runner := newLLMRunner(&fakeLLMClient{output: "a real completion"})
+	output, err := runner(ctx, payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "a real completion" {
+		t.Errorf("got %q, want %q", output, "a real completion")
 	}
 
-	llmOutput, err := runStep(ctx, worker.JobTypeLLMCall, payload)
-	if err != nil {
-		t.Fatalf("llm_call: unexpected error: %v", err)
-	}
-	if llmOutput == payload.Input {
-		t.Errorf("llm_call: expected a distinguishable stub output, got the raw input back: %q", llmOutput)
-	}
-
-	if _, err := runStep(ctx, "unknown_type", payload); err == nil {
-		t.Error("unknown job type: expected an error, got none")
+	failingRunner := newLLMRunner(&fakeLLMClient{err: errors.New("boom")})
+	if _, err := failingRunner(ctx, payload); err == nil {
+		t.Error("expected an error when the client fails, got none")
 	}
 }
