@@ -209,6 +209,8 @@ func TestEvaluateCondition(t *testing.T) {
 		{"not equal false", "{{step_1.output}} != success", false, false},
 		{"user input", "{{user_input}} == hello", true, false},
 		{"malformed", "{{step_1.output}} success", false, true},
+		{"contains true", "{{step_1.output}} contains succ", true, false},
+		{"contains false", "{{step_1.output}} contains fail", false, false},
 	}
 
 	for _, tc := range cases {
@@ -227,6 +229,30 @@ func TestEvaluateCondition(t *testing.T) {
 				t.Errorf("evaluateCondition(%q) = %v, want %v", tc.condition, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEvaluateCondition_FreeFormLLMOutput demonstrates the motivating case
+// from #25: == is brittle against free-form llm_call output, contains is not.
+func TestEvaluateCondition_FreeFormLLMOutput(t *testing.T) {
+	run := &Run{
+		StepResults: map[string]string{"llm_step": "Yes, that worked."},
+	}
+
+	got, err := evaluateCondition("{{llm_step.output}} == success", run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("exact match unexpectedly succeeded against free-form LLM phrasing")
+	}
+
+	got, err = evaluateCondition("{{llm_step.output}} contains worked", run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("contains should match a substring of free-form LLM phrasing")
 	}
 }
 
