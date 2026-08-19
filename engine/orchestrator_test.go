@@ -312,3 +312,42 @@ func TestOnStepCompleted_ConcurrentCallsDoNotLoseUpdates(t *testing.T) {
 		t.Errorf("expected run status 'completed', got %q (completed=%v)", final.Status, final.CompletedSteps)
 	}
 }
+
+func TestResolveStepInput(t *testing.T) {
+	run := &Run{
+		UserInput:   "hello",
+		StepResults: map[string]string{"step_1": "success"},
+	}
+
+	toolCallStep := StepDefinition{
+		ID:             "tool_step",
+		Type:           StepTypeToolCall,
+		InputTemplate:  "input says {{user_input}}",
+		PromptTemplate: "prompt says {{user_input}}",
+	}
+	if got, want := resolveStepInput(toolCallStep, run), "input says hello"; got != want {
+		t.Errorf("tool_call: resolveStepInput() = %q, want %q", got, want)
+	}
+
+	llmCallStep := StepDefinition{
+		ID:             "llm_step",
+		Type:           StepTypeLLMCall,
+		InputTemplate:  "input says {{user_input}}",
+		PromptTemplate: "prompt says {{step_1.output}}",
+	}
+	if got, want := resolveStepInput(llmCallStep, run), "prompt says success"; got != want {
+		t.Errorf("llm_call: resolveStepInput() = %q, want %q", got, want)
+	}
+
+	// An llm_call step with no InputTemplate set (the realistic case
+	// before this fix, InputTemplate would resolve to "" and silently
+	// send an empty prompt) must still resolve PromptTemplate.
+	llmCallNoInput := StepDefinition{
+		ID:             "llm_step_2",
+		Type:           StepTypeLLMCall,
+		PromptTemplate: "summarize {{step_1.output}}",
+	}
+	if got, want := resolveStepInput(llmCallNoInput, run), "summarize success"; got != want {
+		t.Errorf("llm_call with no InputTemplate: resolveStepInput() = %q, want %q", got, want)
+	}
+}

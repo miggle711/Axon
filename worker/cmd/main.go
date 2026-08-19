@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -66,8 +67,12 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		return
 	}
 
-	// Run the stub tool
-	output := payload.Input
+	output, err := runStep(ctx, job.Type, payload)
+	if err != nil {
+		log.Printf("failed to run step %s: %v", payload.StepID, err)
+		nackJob(ctx, httpClient, queueURL, job.ID, err.Error())
+		return
+	}
 
 	// Ack the job with the queue
 	ackReq, err := http.NewRequestWithContext(ctx, http.MethodPost, queueURL+"/jobs/"+job.ID+"/ack", nil)
@@ -108,4 +113,42 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	_ = webhookResp.Body.Close()
 
 	log.Printf("processed step %s for run %s", payload.StepID, payload.RunID)
+}
+
+// nackJob marks a job as failed with the queue so it can be retried or
+// surfaced as an error instead of sitting stuck in the running set.
+func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reason string) {
+	body, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		log.Printf("failed to marshal nack request: %v", err)
+		return
+	}
+
+	nackReq, err := http.NewRequestWithContext(ctx, http.MethodPost, queueURL+"/jobs/"+jobID+"/fail", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("failed to build nack request: %v", err)
+		return
+	}
+	nackReq.Header.Set("Content-Type", "application/json")
+
+	nackResp, err := httpClient.Do(nackReq)
+	if err != nil {
+		log.Printf("failed to nack job: %v", err)
+		return
+	}
+	_ = nackResp.Body.Close()
+}
+
+// runStep executes payload according to jobType, returning the step's
+// output. tool_call runs the echo stub; llm_call is a placeholder
+// until a real LLM client is wired in (see #26).
+func runStep(ctx context.Context, jobType string, payload worker.StepPayload) (string, error) {
+	switch jobType {
+	case worker.JobTypeLLMCall:
+		return "[llm_call stub] " + payload.Input, nil
+	case worker.JobTypeToolCall:
+		return payload.Input, nil
+	default:
+		return "", fmt.Errorf("unsupported job type: %s", jobType)
+	}
 }

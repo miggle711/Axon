@@ -86,6 +86,17 @@ func resolveTemplate(template string, run *Run) string {
 	return result
 }
 
+// resolveStepInput picks the right template field for step's type
+// (PromptTemplate for llm_call, InputTemplate otherwise) and resolves
+// it via resolveTemplate.
+func resolveStepInput(step StepDefinition, run *Run) string {
+	template := step.InputTemplate
+	if step.Type == StepTypeLLMCall {
+		template = step.PromptTemplate
+	}
+	return resolveTemplate(template, run)
+}
+
 // CreateRun initializes a new Run instance based on the provided AgentDefinition and user input.
 // It also sets the ID for the run
 func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition AgentDefinition, userInput string) (*Run, error) {
@@ -157,7 +168,7 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 					RunID:     run.ID,
 					StepID:    step.ID,
 					AgentName: definition.Name,
-					Input:     resolveTemplate(step.InputTemplate, run),
+					Input:     resolveStepInput(step, run),
 				}, 1) // TODO: Default priority set to 1 for initial steps
 			if err != nil {
 				return nil, fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
@@ -241,7 +252,7 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 					RunID:     run.ID,
 					StepID:    step.ID,
 					AgentName: run.AgentName,
-					Input:     resolveTemplate(step.InputTemplate, run),
+					Input:     resolveStepInput(step, run),
 				}, 1) // TODO: Default priority set to 1 for subsequent steps
 			if err != nil {
 				return fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
