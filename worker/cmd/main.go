@@ -70,6 +70,7 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	output, err := runStep(ctx, job.Type, payload)
 	if err != nil {
 		log.Printf("failed to run step %s: %v", payload.StepID, err)
+		nackJob(ctx, httpClient, queueURL, job.ID, err.Error())
 		return
 	}
 
@@ -112,6 +113,30 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	_ = webhookResp.Body.Close()
 
 	log.Printf("processed step %s for run %s", payload.StepID, payload.RunID)
+}
+
+// nackJob marks a job as failed with the queue so it can be retried or
+// surfaced as an error instead of sitting stuck in the running set.
+func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reason string) {
+	body, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		log.Printf("failed to marshal nack request: %v", err)
+		return
+	}
+
+	nackReq, err := http.NewRequestWithContext(ctx, http.MethodPost, queueURL+"/jobs/"+jobID+"/fail", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("failed to build nack request: %v", err)
+		return
+	}
+	nackReq.Header.Set("Content-Type", "application/json")
+
+	nackResp, err := httpClient.Do(nackReq)
+	if err != nil {
+		log.Printf("failed to nack job: %v", err)
+		return
+	}
+	_ = nackResp.Body.Close()
 }
 
 // runStep executes payload according to jobType, returning the step's
