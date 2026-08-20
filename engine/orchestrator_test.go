@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -320,6 +321,233 @@ func TestAgentCall_ErrorCases(t *testing.T) {
 		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
 		if err == nil {
 			t.Fatal("expected an error for an output_step that doesn't match any step ID, got none")
+		}
+	})
+}
+
+// supervisorTestAgentSteps builds a supervisor step with two Options,
+// each a tool_call that depends on the supervisor and produces a
+// distinguishable output, plus a final step depending on the
+// supervisor's own eventual result.
+func supervisorTestAgentSteps() []StepDefinition {
+	return []StepDefinition{
+		{
+			ID:             "supervisor_step",
+			Type:           StepTypeSupervisor,
+			PromptTemplate: "decide",
+			Options:        []string{"option_a", "option_b"},
+			DependsOn:      []string{},
+		},
+		{
+			ID:            "option_a",
+			Type:          StepTypeToolCall,
+			Tool:          "echo",
+			InputTemplate: "ran option a",
+			DependsOn:     []string{"supervisor_step"},
+		},
+		{
+			ID:            "option_b",
+			Type:          StepTypeToolCall,
+			Tool:          "echo",
+			InputTemplate: "ran option b",
+			DependsOn:     []string{"supervisor_step"},
+		},
+		{
+			ID:            "after_supervisor",
+			Type:          StepTypeToolCall,
+			Tool:          "echo",
+			InputTemplate: "{{supervisor_step.output}}",
+			DependsOn:     []string{"supervisor_step"},
+		},
+	}
+}
+
+// TestSupervisor_LoopsAndStops exercises the full supervisor loop: it
+// picks an option, the option completes and re-triggers the supervisor
+// for another decision, and it eventually stops on the "done" signal —
+// unblocking after_supervisor with the last chosen option's output.
+func TestSupervisor_LoopsAndStops(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+
+	agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	if _, enqueued := run.EnqueuedSteps["supervisor_step"]; !enqueued {
+		t.Fatalf("expected supervisor_step to be enqueued after CreateRun, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+
+	// Iteration 1: supervisor picks option_a.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "option_a"}); err != nil {
+		t.Fatalf("supervisor decision 1 (option_a) failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.ActiveSupervisorChoice["supervisor_step"] != "option_a" {
+		t.Fatalf("expected active choice option_a, got %q", run.ActiveSupervisorChoice["supervisor_step"])
+	}
+	if run.SupervisorIterations["supervisor_step"] != 1 {
+		t.Fatalf("expected 1 iteration recorded, got %d", run.SupervisorIterations["supervisor_step"])
+	}
+	if _, enqueued := run.EnqueuedSteps["option_a"]; !enqueued {
+		t.Fatalf("expected option_a to be enqueued, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+
+	// option_a completes, which should re-trigger the supervisor rather
+	// than treating option_a as a normally-completed step.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "option_a", Output: "ran option a"}); err != nil {
+		t.Fatalf("option_a completion failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	for _, completedID := range run.CompletedSteps {
+		if completedID == "option_a" {
+			t.Errorf("option_a should not be in CompletedSteps while its supervisor is still looping, got %v", run.CompletedSteps)
+		}
+	}
+	if _, enqueued := run.EnqueuedSteps["supervisor_step"]; !enqueued {
+		t.Fatalf("expected supervisor_step to be re-enqueued for its next decision, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+
+	// Iteration 2: supervisor picks option_b this time.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "option_b"}); err != nil {
+		t.Fatalf("supervisor decision 2 (option_b) failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.SupervisorIterations["supervisor_step"] != 2 {
+		t.Fatalf("expected 2 iterations recorded, got %d", run.SupervisorIterations["supervisor_step"])
+	}
+
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "option_b", Output: "ran option b"}); err != nil {
+		t.Fatalf("option_b completion failed: %v", err)
+	}
+
+	// Iteration 3: supervisor says done.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: SupervisorDoneSignal}); err != nil {
+		t.Fatalf("supervisor decision 3 (done) failed: %v", err)
+	}
+
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if _, active := run.ActiveSupervisorChoice["supervisor_step"]; active {
+		t.Errorf("expected no active choice after stopping, got %v", run.ActiveSupervisorChoice)
+	}
+	if run.StepResults["supervisor_step"] != "ran option b" {
+		t.Errorf("expected supervisor_step result to be the last chosen option's output 'ran option b', got %q", run.StepResults["supervisor_step"])
+	}
+	found := false
+	for _, completedID := range run.CompletedSteps {
+		if completedID == "supervisor_step" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected supervisor_step in CompletedSteps once stopped, got %v", run.CompletedSteps)
+	}
+	if _, enqueued := run.EnqueuedSteps["after_supervisor"]; !enqueued {
+		t.Errorf("expected after_supervisor to be enqueued once the supervisor stopped, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+}
+
+// TestSupervisor_IterationCap verifies that hitting
+// MaxSupervisorIterations force-stops the loop (ignoring a further
+// Options pick) using the most recent option's output, rather than
+// enqueuing a 6th option.
+func TestSupervisor_IterationCap(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+
+	agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	for i := 0; i < MaxSupervisorIterations; i++ {
+		if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "option_a"}); err != nil {
+			t.Fatalf("supervisor decision %d failed: %v", i+1, err)
+		}
+		if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "option_a", Output: fmt.Sprintf("ran option a #%d", i+1)}); err != nil {
+			t.Fatalf("option_a completion %d failed: %v", i+1, err)
+		}
+	}
+
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.SupervisorIterations["supervisor_step"] != MaxSupervisorIterations {
+		t.Fatalf("expected %d iterations recorded, got %d", MaxSupervisorIterations, run.SupervisorIterations["supervisor_step"])
+	}
+
+	// A 6th pick should be force-stopped instead of enqueued.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "option_a"}); err != nil {
+		t.Fatalf("supervisor decision at cap failed: %v", err)
+	}
+
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.SupervisorIterations["supervisor_step"] != MaxSupervisorIterations {
+		t.Errorf("expected iteration count to stay at the cap %d, got %d", MaxSupervisorIterations, run.SupervisorIterations["supervisor_step"])
+	}
+	wantOutput := fmt.Sprintf("ran option a #%d", MaxSupervisorIterations)
+	if run.StepResults["supervisor_step"] != wantOutput {
+		t.Errorf("expected supervisor_step result %q (the capped iteration's output), got %q", wantOutput, run.StepResults["supervisor_step"])
+	}
+}
+
+func TestSupervisor_ErrorCases(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	newOrchestrator := func() (*Orchestrator, *Run) {
+		store := newFakeRunStore()
+		orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+		agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
+		run, err := orchestrator.CreateRun(context.Background(), agent, "start")
+		if err != nil {
+			t.Fatalf("CreateRun failed: %v", err)
+		}
+		return orchestrator, run
+	}
+
+	t.Run("unrecognized output", func(t *testing.T) {
+		orchestrator, run := newOrchestrator()
+		err := orchestrator.OnStepCompleted(context.Background(), WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "not a real option"})
+		if err == nil {
+			t.Fatal("expected an error for an unrecognized supervisor output, got none")
+		}
+	})
+
+	t.Run("done before any option ran", func(t *testing.T) {
+		orchestrator, run := newOrchestrator()
+		err := orchestrator.OnStepCompleted(context.Background(), WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: SupervisorDoneSignal})
+		if err == nil {
+			t.Fatal("expected an error for 'done' before any option has run, got none")
 		}
 	})
 }

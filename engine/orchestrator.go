@@ -43,6 +43,13 @@ func (orchestrator *Orchestrator) lockFor(runID string) *sync.Mutex {
 // canEnqueueStep reports whether step is ready to run: it has not
 // already been enqueued, and every dependency in step.DependsOn has
 // a recorded result in run.
+//
+// A supervisor's Options steps are deliberately re-run across loop
+// iterations, but that repeat-enqueuing goes through
+// enqueueOptionStep directly, not through this function — so this
+// check staying strictly one-shot is correct: once an Options step
+// finally settles (its supervisor stops), it must not be eligible for
+// enqueuing again via the normal resolve loop below.
 func canEnqueueStep(step StepDefinition, run *Run) bool {
 	// Check if the step has already been enqueued in the run
 	if _, exists := run.EnqueuedSteps[step.ID]; exists {
@@ -89,11 +96,11 @@ func resolveTemplate(template string, run *Run) string {
 }
 
 // resolveStepInput picks the right template field for step's type
-// (PromptTemplate for llm_call, InputTemplate otherwise) and resolves
-// it via resolveTemplate.
+// (PromptTemplate for llm_call and supervisor, InputTemplate otherwise)
+// and resolves it via resolveTemplate.
 func resolveStepInput(step StepDefinition, run *Run) string {
 	template := step.InputTemplate
-	if step.Type == StepTypeLLMCall {
+	if step.Type == StepTypeLLMCall || step.Type == StepTypeSupervisor {
 		template = step.PromptTemplate
 	}
 	return resolveTemplate(template, run)
@@ -117,21 +124,22 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 
 	// Initialize the Run struct with the provided definition and user input
 	run := &Run{
-		ID:                   id.String(),
-		AgentName:            definition.Name,
-		UserInput:            userInput,
-		Status:               "in_progress", // Initial status set to in_progress
-		Steps:                definition.Steps,
-		StepResults:          make(map[string]string),
-		EnqueuedSteps:        make(map[string]string),
-		CompletedSteps:       []string{},
-		FailedSteps:          []string{},
-		SkippedSteps:         []string{},
-		ParentRunID:          parentRunID,
-		ParentStepID:         parentStepID,
-		SupervisorIterations: make(map[string]int),
-		CreatedAt:            time.Now(),
-		UpdatedAt:            time.Now(),
+		ID:                     id.String(),
+		AgentName:              definition.Name,
+		UserInput:              userInput,
+		Status:                 "in_progress", // Initial status set to in_progress
+		Steps:                  definition.Steps,
+		StepResults:            make(map[string]string),
+		EnqueuedSteps:          make(map[string]string),
+		CompletedSteps:         []string{},
+		FailedSteps:            []string{},
+		SkippedSteps:           []string{},
+		ParentRunID:            parentRunID,
+		ParentStepID:           parentStepID,
+		SupervisorIterations:   make(map[string]int),
+		ActiveSupervisorChoice: make(map[string]string),
+		CreatedAt:              time.Now(),
+		UpdatedAt:              time.Now(),
 	}
 
 	// Enqueue the initial steps of the workflow that have no
@@ -254,10 +262,50 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 		return fmt.Errorf("failed to retrieve run: %v", err)
 	}
 
-	// Update the run's StepResults with the output of the completed step
+	// A supervisor step's own completion (its LLM decision came back
+	// from the worker) is handled entirely separately: it doesn't
+	// record a normal StepResults/CompletedSteps entry itself here,
+	// since the loop may continue rather than actually finish.
+	if step, ok := findStep(run.Steps, payload.StepID); ok && step.Type == StepTypeSupervisor {
+		return orchestrator.handleSupervisorDecision(ctx, run, step, payload.Output)
+	}
+
+	// If the completing step is the option a still-looping supervisor
+	// most recently chose, this isn't normal DAG progression — it's the
+	// signal to re-invoke that supervisor for its next decision. Its
+	// output is recorded (so {{step.output}} works for anything the
+	// option step's own dependents might reference), but it's
+	// deliberately not added to CompletedSteps: that stays reserved for
+	// the supervisor step itself, once its loop actually ends, so the
+	// run-completion count isn't thrown off by an option step that may
+	// run several times.
+	for supervisorID, chosen := range run.ActiveSupervisorChoice {
+		if chosen != payload.StepID {
+			continue
+		}
+		run.StepResults[payload.StepID] = payload.Output
+		if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+			return fmt.Errorf("failed to save updated run: %v", err)
+		}
+		supervisorStep, ok := findStep(run.Steps, supervisorID)
+		if !ok {
+			return fmt.Errorf("active supervisor step %s not found in run.Steps", supervisorID)
+		}
+		return orchestrator.enqueueSupervisorDecision(ctx, run, supervisorStep)
+	}
+
 	run.StepResults[payload.StepID] = payload.Output
 	run.CompletedSteps = append(run.CompletedSteps, payload.StepID)
+	return orchestrator.finalizeStepCompletion(ctx, run)
+}
 
+// finalizeStepCompletion runs the shared tail of a step's completion:
+// resolving any newly-unblocked steps (or supervisor decisions,
+// conditionals, agent_call spawns), recomputing run status, saving, and
+// propagating completion to a parent run if this run is a child spawned
+// via agent_call. Called both by OnStepCompleted's normal path and by
+// handleSupervisorDecision once a supervisor loop actually stops.
+func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, run *Run) error {
 	// Check if any dependent steps can now be enqueued or, for
 	// conditionals, resolved. Repeats until a full pass makes no
 	// further progress, since resolving a conditional can unblock a
@@ -299,6 +347,14 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 					return fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
 				}
 				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
+				changed = true
+				continue
+			}
+
+			if step.Type == StepTypeSupervisor {
+				if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
+					return err
+				}
 				changed = true
 				continue
 			}
@@ -358,6 +414,130 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 	}
 
 	return nil
+}
+
+// findStep returns the step with the given ID from steps, if present.
+func findStep(steps []StepDefinition, stepID string) (StepDefinition, bool) {
+	for _, step := range steps {
+		if step.ID == stepID {
+			return step, true
+		}
+	}
+	return StepDefinition{}, false
+}
+
+// enqueueSupervisorDecision enqueues a queue job for supervisorStep,
+// reusing the same llm_call-shaped execution path in the worker (its
+// PromptTemplate is resolved and sent as Input). The worker's response
+// comes back through the normal webhook path, where OnStepCompleted
+// recognizes it as a supervisor step and routes to
+// handleSupervisorDecision instead of normal DAG progression.
+func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context, run *Run, supervisorStep StepDefinition) error {
+	jobID, err := orchestrator.queueClient.Enqueue(
+		ctx,
+		supervisorStep.Type,
+		StepPayload{
+			RunID:     run.ID,
+			StepID:    supervisorStep.ID,
+			AgentName: run.AgentName,
+			Input:     resolveStepInput(supervisorStep, run),
+		}, 1)
+	if err != nil {
+		return fmt.Errorf("failed to enqueue supervisor decision for step %s: %v", supervisorStep.ID, err)
+	}
+	run.EnqueuedSteps[supervisorStep.ID] = jobID
+	return orchestrator.store.SaveRun(ctx, run)
+}
+
+// handleSupervisorDecision processes a supervisor step's LLM decision
+// (decision is the worker's raw output for that step): it must exactly
+// match SupervisorDoneSignal or one of supervisorStep.Options.
+//
+//   - An Options match, with fewer than MaxSupervisorIterations already
+//     used, enqueues that option step and records it as the supervisor's
+//     active choice, awaiting its completion to loop again.
+//   - An Options match at the iteration cap is treated the same as a
+//     "done" signal instead of enqueuing a 6th option, using the most
+//     recently completed option's output as the result (#26/#16 scoping:
+//     the cap is a ceiling on option executions, not decisions).
+//   - SupervisorDoneSignal before any option has run is an error: there
+//     is no prior option output to use as the supervisor's result, and
+//     it most likely means the prompt isn't instructing the model
+//     correctly.
+func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, run *Run, supervisorStep StepDefinition, decision string) error {
+	decision = strings.TrimSpace(decision)
+
+	isOption := false
+	for _, opt := range supervisorStep.Options {
+		if decision == opt {
+			isOption = true
+			break
+		}
+	}
+
+	if !isOption && decision != SupervisorDoneSignal {
+		return fmt.Errorf("supervisor step %s: LLM output %q did not match \"%s\" or any of %v",
+			supervisorStep.ID, decision, SupervisorDoneSignal, supervisorStep.Options)
+	}
+
+	atCap := run.SupervisorIterations[supervisorStep.ID] >= MaxSupervisorIterations
+	if isOption && !atCap {
+		run.SupervisorIterations[supervisorStep.ID]++
+		run.ActiveSupervisorChoice[supervisorStep.ID] = decision
+		if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+			return fmt.Errorf("failed to save updated run: %v", err)
+		}
+
+		optionStep, ok := findStep(run.Steps, decision)
+		if !ok {
+			return fmt.Errorf("supervisor step %s: chosen option %q is not a step in this run", supervisorStep.ID, decision)
+		}
+		return orchestrator.enqueueOptionStep(ctx, run, optionStep)
+	}
+
+	// Stopping: either the LLM said "done", or an Options pick hit the
+	// iteration cap and is being force-stopped instead of enqueued.
+	if run.SupervisorIterations[supervisorStep.ID] == 0 {
+		return fmt.Errorf("supervisor step %s: got %q before any option ran; the prompt must have the model pick an option first",
+			supervisorStep.ID, SupervisorDoneSignal)
+	}
+
+	lastChoice := run.ActiveSupervisorChoice[supervisorStep.ID]
+	delete(run.ActiveSupervisorChoice, supervisorStep.ID)
+
+	run.StepResults[supervisorStep.ID] = run.StepResults[lastChoice]
+	run.CompletedSteps = append(run.CompletedSteps, supervisorStep.ID)
+	return orchestrator.finalizeStepCompletion(ctx, run)
+}
+
+// enqueueOptionStep enqueues optionStep the way a normal step is
+// enqueued, bypassing the queueClient's job-type dispatch quirks by
+// reusing the same shape as the main resolve loops in
+// createRun/OnStepCompleted.
+func (orchestrator *Orchestrator) enqueueOptionStep(ctx context.Context, run *Run, optionStep StepDefinition) error {
+	if optionStep.Type == StepTypeAgentCall {
+		childRun, err := orchestrator.spawnChildRun(ctx, optionStep, run)
+		if err != nil {
+			return fmt.Errorf("failed to spawn child run for option step %s: %v", optionStep.ID, err)
+		}
+		run.EnqueuedSteps[optionStep.ID] = "run:" + childRun.ID
+		return orchestrator.store.SaveRun(ctx, run)
+	}
+
+	jobID, err := orchestrator.queueClient.Enqueue(
+		ctx,
+		optionStep.Type,
+		StepPayload{
+			RunID:     run.ID,
+			StepID:    optionStep.ID,
+			AgentName: run.AgentName,
+			Input:     resolveStepInput(optionStep, run),
+		}, 1)
+	if err != nil {
+		return fmt.Errorf("failed to enqueue option step %s: %v", optionStep.ID, err)
+	}
+	run.EnqueuedSteps[optionStep.ID] = jobID
+	return orchestrator.store.SaveRun(ctx, run)
 }
 
 // evaluateCondition resolves condition's template placeholders and
