@@ -4,8 +4,9 @@ package worker
 // constants rather than importing axon-engine, matching how the
 // other types in this file avoid a cross-module dependency.
 const (
-	JobTypeToolCall = "tool_call"
-	JobTypeLLMCall  = "llm_call"
+	JobTypeToolCall   = "tool_call"
+	JobTypeLLMCall    = "llm_call"
+	JobTypeSupervisor = "supervisor"
 )
 
 type JobResponse struct {
