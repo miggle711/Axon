@@ -1,6 +1,6 @@
 {
   "name": "greeter",
-  "description": "Sub-agent example for agent_call: echoes a greeting back. tool_call is currently a stub (see #15), so this demonstrates the agent_call wiring rather than real tool execution.",
+  "description": "Sub-agent example for agent_call: echoes a greeting back using the echo tool.",
   "output_step": "greet",
   "steps": [
     {

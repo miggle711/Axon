@@ -6,19 +6,29 @@ import (
 	"testing"
 
 	worker "axon-worker"
+	"axon-worker/tools"
 )
 
-func TestRunToolCall(t *testing.T) {
+func TestToolCallRunner(t *testing.T) {
 	ctx := context.Background()
-	payload := worker.StepPayload{Input: "hello"}
+	registry := map[string]tools.Tool{"echo": tools.Echo{}}
+	runner := newToolCallRunner(registry)
 
-	output, err := runToolCall(ctx, payload)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if output != "hello" {
-		t.Errorf("got %q, want %q", output, "hello")
-	}
+	t.Run("dispatches to the named tool", func(t *testing.T) {
+		output, err := runner(ctx, worker.StepPayload{Tool: "echo", Input: "hello"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if output != "hello" {
+			t.Errorf("got %q, want %q", output, "hello")
+		}
+	})
+
+	t.Run("unknown tool errors instead of falling back", func(t *testing.T) {
+		if _, err := runner(ctx, worker.StepPayload{Tool: "does_not_exist", Input: "hello"}); err == nil {
+			t.Error("expected an error for an unregistered tool, got none")
+		}
+	})
 }
 
 type fakeLLMClient struct {
