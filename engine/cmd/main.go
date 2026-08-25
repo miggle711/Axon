@@ -12,6 +12,7 @@ func main() {
 	redisURL := flag.String("redis", "redis://localhost:6379", "Redis URL")
 	queueURL := flag.String("queue", "http://localhost:8080", "Queue service URL")
 	port := flag.String("port", "8000", "Port for the API server")
+	agentsDir := flag.String("agents", "agents", "Directory of agent JSON files, for agent_call to resolve sub-agents by name")
 	flag.Parse()
 
 	// Initialize the orchestrator with a Redis store and a queue client
@@ -21,10 +22,13 @@ func main() {
 	}
 
 	queueClient := engine.NewQueueClient(*queueURL)
-	// No agent-loading mechanism exists yet, so the registry starts
-	// empty; agent_call steps will fail with "unknown agent" until one
-	// is registered here.
-	agents := engine.MapAgentRegistry{}
+
+	agents, err := engine.LoadAgentsFromDir(*agentsDir)
+	if err != nil {
+		log.Fatalf("Failed to load agents from %s: %v", *agentsDir, err)
+	}
+	log.Printf("Loaded %d agent(s) from %s", len(agents), *agentsDir)
+
 	orchestrator := engine.NewOrchestrator(store, queueClient, agents)
 
 	// Create the API server

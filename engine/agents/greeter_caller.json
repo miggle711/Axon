@@ -1,0 +1,20 @@
+{
+  "name": "greeter_caller",
+  "description": "Top-level example agent: calls the greeter sub-agent via agent_call, then echoes its result. Demonstrates a real, on-disk agent_call chain end-to-end.",
+  "steps": [
+    {
+      "id": "call_greeter",
+      "type": "agent_call",
+      "agent": "greeter",
+      "input_template": "{{user_input}}",
+      "depends_on": []
+    },
+    {
+      "id": "after_greeting",
+      "type": "tool_call",
+      "tool": "echo",
+      "input_template": "greeter said: {{call_greeter.output}}",
+      "depends_on": ["call_greeter"]
+    }
+  ]
+}
