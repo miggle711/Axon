@@ -14,6 +14,15 @@ const (
 	StepTypeSupervisor  StepType = "supervisor"
 )
 
+// SupervisorDoneSignal is the reserved value a supervisor step's
+// PromptTemplate must instruct its LLM to answer with in order to stop
+// looping, as opposed to answering with one of the step's Options.
+const SupervisorDoneSignal = "done"
+
+// MaxSupervisorIterations caps how many Options a single supervisor
+// step may choose across its loop before being force-stopped.
+const MaxSupervisorIterations = 5
+
 // a single step in the workflow
 type StepDefinition struct {
 	// Core fields
@@ -69,6 +78,16 @@ type Run struct {
 	ParentStepID string `json:"parent_step_id"` // the agent_call step that created this child
 
 	SupervisorIterations map[string]int `json:"supervisor_iterations"` // supervisor_id → iteration count (max 5)
+
+	// ActiveSupervisorChoice tracks, for each currently-looping
+	// supervisor step, which Options step it most recently chose and is
+	// waiting on. Cleared for a supervisor once it stops (LLM says
+	// "done", or the iteration cap is hit). Lets OnStepCompleted tell
+	// an option step's completion apart from a normal step's: if the
+	// completing step ID is some supervisor's active choice, control
+	// returns to that supervisor for its next decision instead of
+	// following normal DAG progression.
+	ActiveSupervisorChoice map[string]string `json:"active_supervisor_choice"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

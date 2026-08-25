@@ -32,9 +32,14 @@ func main() {
 
 	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
 		groqClient := llm.NewGroqClient(apiKey, *groqModel, httpClient)
-		runners[worker.JobTypeLLMCall] = newLLMRunner(groqClient)
+		llmRunner := newLLMRunner(groqClient)
+		runners[worker.JobTypeLLMCall] = llmRunner
+		// supervisor steps are decided by the same prompt-in/text-out
+		// call as llm_call; the engine is what interprets the output
+		// as a routing decision, not the worker.
+		runners[worker.JobTypeSupervisor] = llmRunner
 	} else {
-		log.Printf("GROQ_API_KEY not set: llm_call jobs will be nacked until it is provided")
+		log.Printf("GROQ_API_KEY not set: llm_call and supervisor jobs will be nacked until it is provided")
 	}
 
 	for {
