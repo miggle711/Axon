@@ -13,6 +13,7 @@ import (
 
 	worker "axon-worker"
 	"axon-worker/llm"
+	"axon-worker/tools"
 )
 
 func main() {
@@ -26,8 +27,17 @@ func main() {
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 
+	toolRegistry := map[string]tools.Tool{
+		"echo": tools.Echo{},
+	}
+	if apiKey := os.Getenv("TAVILY_API_KEY"); apiKey != "" {
+		toolRegistry["tavily_search"] = tools.NewTavilySearch(apiKey, httpClient)
+	} else {
+		log.Printf("TAVILY_API_KEY not set: tavily_search tool_call steps will be nacked until it is provided")
+	}
+
 	runners := map[string]StepRunner{
-		worker.JobTypeToolCall: runToolCall,
+		worker.JobTypeToolCall: newToolCallRunner(toolRegistry),
 	}
 
 	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
@@ -170,9 +180,22 @@ func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reas
 // type registered in main's runners map has one of these.
 type StepRunner func(ctx context.Context, payload worker.StepPayload) (string, error)
 
-// runToolCall is the tool_call stub: it echoes the input back as output.
-func runToolCall(ctx context.Context, payload worker.StepPayload) (string, error) {
-	return payload.Input, nil
+// newToolCallRunner returns a StepRunner that dispatches a tool_call
+// step to the tool named by payload.Tool in registry, so a new tool
+// can be added by registering it here rather than modifying dispatch
+// logic itself (#15).
+func newToolCallRunner(registry map[string]tools.Tool) StepRunner {
+	return func(ctx context.Context, payload worker.StepPayload) (string, error) {
+		tool, ok := registry[payload.Tool]
+		if !ok {
+			return "", fmt.Errorf("tool_call: unknown or unavailable tool %q", payload.Tool)
+		}
+		output, err := tool.Run(ctx, payload.Input)
+		if err != nil {
+			return "", fmt.Errorf("tool_call (%s): %w", payload.Tool, err)
+		}
+		return output, nil
+	}
 }
 
 // newLLMRunner returns a StepRunner that sends payload.Input (the resolved

@@ -19,6 +19,7 @@ type StepPayload struct {
 	RunID     string `json:"run_id"`
 	StepID    string `json:"step_id"`
 	AgentName string `json:"agent_name"`
+	Tool      string `json:"tool,omitempty"` // which tool to dispatch to, for tool_call steps
 	Input     string `json:"input"`
 }
 

@@ -1,0 +1,20 @@
+{
+  "name": "research_agent",
+  "description": "Searches the web for the user's query via Tavily, then uses an LLM to synthesize an answer from the results. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker.",
+  "output_step": "answer",
+  "steps": [
+    {
+      "id": "search",
+      "type": "tool_call",
+      "tool": "tavily_search",
+      "input_template": "{{user_input}}",
+      "depends_on": []
+    },
+    {
+      "id": "answer",
+      "type": "llm_call",
+      "prompt_template": "Answer the question using only the search results below. Be concise.\n\nQuestion: {{user_input}}\n\nSearch results:\n{{search.output}}",
+      "depends_on": ["search"]
+    }
+  ]
+}

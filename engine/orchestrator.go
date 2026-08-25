@@ -198,6 +198,7 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 					RunID:     run.ID,
 					StepID:    step.ID,
 					AgentName: definition.Name,
+					Tool:      step.Tool,
 					Input:     resolveStepInput(step, run),
 				}, 1) // TODO: Default priority set to 1 for initial steps
 			if err != nil {
@@ -370,6 +371,7 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 					RunID:     run.ID,
 					StepID:    step.ID,
 					AgentName: run.AgentName,
+					Tool:      step.Tool,
 					Input:     resolveStepInput(step, run),
 				}, 1) // TODO: Default priority set to 1 for subsequent steps
 			if err != nil {
@@ -443,6 +445,7 @@ func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context,
 			RunID:     run.ID,
 			StepID:    supervisorStep.ID,
 			AgentName: run.AgentName,
+			Tool:      supervisorStep.Tool,
 			Input:     resolveStepInput(supervisorStep, run),
 		}, 1)
 	if err != nil {
@@ -534,6 +537,7 @@ func (orchestrator *Orchestrator) enqueueOptionStep(ctx context.Context, run *Ru
 			RunID:     run.ID,
 			StepID:    optionStep.ID,
 			AgentName: run.AgentName,
+			Tool:      optionStep.Tool,
 			Input:     resolveStepInput(optionStep, run),
 		}, 1)
 	if err != nil {
