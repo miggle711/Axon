@@ -116,6 +116,9 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 // parentRunID/parentStepID so agent_call can spawn a child run that
 // knows where to propagate its completion back to.
 func (orchestrator *Orchestrator) createRun(ctx context.Context, definition AgentDefinition, userInput string, parentRunID, parentStepID string) (*Run, error) {
+	if err := validateAgentDefinition(definition); err != nil {
+		return nil, fmt.Errorf("invalid agent definition: %w", err)
+	}
 
 	id, err := uuid.NewV7()
 	if err != nil {
