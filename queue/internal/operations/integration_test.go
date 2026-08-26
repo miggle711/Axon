@@ -150,3 +150,71 @@ func TestNackJobIntegration(t *testing.T) {
 	}
 	t.Log("✓ Status verified as failed")
 }
+
+func TestNackRetriesJobIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	redisStore, err := store.NewRedisStore("redis://localhost:6379")
+	if err != nil {
+		t.Skipf("Could not connect to Redis: %v", err)
+	}
+
+	q := NewQueue(redisStore, redisStore, redisStore)
+
+	job := &jobpkg.Job{
+		ID:         "integration-test-nack-retry",
+		Type:       "email",
+		Status:     "pending",
+		Priority:   1,
+		MaxRetries: 2,
+	}
+
+	if err := q.Enqueue(ctx, job); err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+	t.Log("✓ Job enqueued")
+
+	dequeuedJob, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue failed: %v", err)
+	}
+
+	// First Nack: one retry remains (MaxRetries=2), so this should
+	// re-enqueue rather than permanently fail.
+	if err := q.Nack(ctx, dequeuedJob.ID, "transient error"); err != nil {
+		t.Fatalf("Nack (1st) failed: %v", err)
+	}
+	status, _ := q.GetJobStatus(ctx, dequeuedJob.ID)
+	if status != "pending" {
+		t.Fatalf("expected status 'pending' after first Nack with retries remaining, got %q", status)
+	}
+	t.Log("✓ First Nack re-enqueued the job instead of failing it")
+
+	// It must actually be dequeuable again.
+	redequeued, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("re-Dequeue failed: %v", err)
+	}
+	if redequeued == nil || redequeued.ID != dequeuedJob.ID {
+		t.Fatalf("expected to re-dequeue %s, got %+v", dequeuedJob.ID, redequeued)
+	}
+	if redequeued.Retries != 1 {
+		t.Errorf("expected Retries=1 after one Nack, got %d", redequeued.Retries)
+	}
+	t.Log("✓ Job was re-dequeued with an incremented retry count")
+
+	// Second Nack: retries now reach MaxRetries, so this should
+	// permanently fail.
+	if err := q.Nack(ctx, redequeued.ID, "transient error again"); err != nil {
+		t.Fatalf("Nack (2nd) failed: %v", err)
+	}
+	finalStatus, _ := q.GetJobStatus(ctx, redequeued.ID)
+	if finalStatus != "failed" {
+		t.Errorf("expected status 'failed' once retries are exhausted, got %q", finalStatus)
+	}
+	t.Log("✓ Second Nack permanently failed the job once retries were exhausted")
+}
