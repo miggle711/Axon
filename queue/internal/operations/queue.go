@@ -7,11 +7,12 @@ import (
 	"axon-queue/internal/store"
 )
 
-//   Job lifecycle:                                                                                                                                                                                          
+//   Job lifecycle:
 //   1. Enqueue > Store job + add to pending queue
-//   2. Dequeue > Remove from pending + add to running                                                                                                                                                       
+//   2. Dequeue > Remove from pending + add to running
 //   3. Ack > Remove from running + update job status to "completed"
-//   4. Nack > Remove from running + add to failed list + update job status to "failed"
+//   4. Nack, retries remaining > Remove from running + increment retry count + re-add to pending
+//   5. Nack, retries exhausted > Remove from running + add to failed list + update job status to "failed"
 
 type Queue struct {
 	jobStore store.JobStore
@@ -76,22 +77,42 @@ func (q *Queue) Ack(ctx context.Context, jobID string) error {
 }
 
 func (q *Queue) Nack(ctx context.Context, jobID string, reason string) error {
-	// Job failure handler
-	// Remove the job from the running_jobs set and add it to the failed_jobs list
+	// Job failure handler. Every failure (a tool/LLM error, a timeout,
+	// a transient network error - Nack doesn't distinguish, see #37)
+	// gets a retry up to the job's MaxRetries before being permanently
+	// failed, instead of failing outright on the first attempt.
 	err := q.ops.RemoveFromRunning(ctx, jobID)
 	if err != nil {
 		return err
 	}
-	// Retrieve the job to pass to AddToFailed
+
 	job, err := q.jobStore.GetJob(ctx, jobID)
 	if err != nil {
 		return err
 	}
-	if job != nil {
-		err = q.ops.AddToFailed(ctx, job, reason)
-		if err != nil {
+	if job == nil {
+		return nil // job no longer exists; nothing left to retry or fail
+	}
+
+	retries, err := q.jobStore.IncrementRetries(ctx, jobID)
+	if err != nil {
+		return err
+	}
+
+	if retries < job.MaxRetries {
+		// Retries remain: put it straight back into pending to run
+		// again. No backoff/delay yet (see #37) - RunAt is stored but
+		// PopFromPending doesn't check it, so an immediate re-enqueue
+		// is the only scheduling this queue currently supports.
+		if err := q.ops.AddToPending(ctx, job, job.Priority); err != nil {
 			return err
 		}
+		return q.jobStore.UpdateJobStatus(ctx, jobID, "pending")
+	}
+
+	// Retries exhausted: fail permanently.
+	if err := q.ops.AddToFailed(ctx, job, reason); err != nil {
+		return err
 	}
 	return q.jobStore.UpdateJobStatus(ctx, jobID, "failed")
 }

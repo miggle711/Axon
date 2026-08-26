@@ -17,6 +17,10 @@ type JobStore interface {
 	StoreJob(ctx context.Context, job *queue.Job) error
 	GetJob(ctx context.Context, jobID string) (*queue.Job, error)
 	UpdateJobStatus(ctx context.Context, jobID string, status string) error
+	// IncrementRetries atomically increments a job's retry count and
+	// returns the new value, so Nack can decide whether to retry or
+	// fail without a separate read-modify-write.
+	IncrementRetries(ctx context.Context, jobID string) (int, error)
 }
 
 // QueueOperations interface handles all queue state transitions
@@ -157,6 +161,16 @@ func (s *RedisStore) hgetall(ctx context.Context, key string) (map[string]string
 func (s *RedisStore) UpdateJobStatus(ctx context.Context, jobID string, status string) error {
 	// Implementation to update the status of a job in the Redis hash, allowing for tracking the state of the job as it progresses through the queue system.
 	return s.client.HSet(ctx, "job:"+jobID, "status", status).Err()
+}
+
+func (s *RedisStore) IncrementRetries(ctx context.Context, jobID string) (int, error) {
+	// HINCRBY atomically increments the hash field and returns the new
+	// value, avoiding a separate read-modify-write race.
+	newCount, err := s.client.HIncrBy(ctx, "job:"+jobID, "retries", 1).Result()
+	if err != nil {
+		return 0, err
+	}
+	return int(newCount), nil
 }
 
 func (s *RedisStore) GetPendingCount(ctx context.Context) (int64, error) {

@@ -35,6 +35,15 @@ func (m *MockJobStore) UpdateJobStatus(ctx context.Context, jobID string, status
 	return nil
 }
 
+func (m *MockJobStore) IncrementRetries(ctx context.Context, jobID string) (int, error) {
+	job, ok := m.jobs[jobID]
+	if !ok {
+		return 0, nil
+	}
+	job.Retries++
+	return job.Retries, nil
+}
+
 // MockQueueOperations implements store.QueueOperations for testing
 type MockQueueOperations struct {
 	pending   []*jobpkg.Job
@@ -218,7 +227,7 @@ func TestAckMarksJobCompleted(t *testing.T) {
 	}
 }
 
-func TestNackMarksJobFailed(t *testing.T) {
+func TestNackMarksJobFailed_NoRetriesConfigured(t *testing.T) {
 	ctx := context.Background()
 	mockStore := NewMockJobStore()
 	mockOps := NewMockQueueOperations()
@@ -227,9 +236,10 @@ func TestNackMarksJobFailed(t *testing.T) {
 
 	jobID := "test-job-1"
 	job := &jobpkg.Job{
-		ID:     jobID,
-		Type:   "email",
-		Status: "running",
+		ID:         jobID,
+		Type:       "email",
+		Status:     "running",
+		MaxRetries: 0, // no retries allowed, so the first Nack fails it permanently
 	}
 
 	mockStore.StoreJob(ctx, job)
@@ -254,6 +264,93 @@ func TestNackMarksJobFailed(t *testing.T) {
 	updatedJob, _ := mockStore.GetJob(ctx, jobID)
 	if updatedJob.Status != "failed" {
 		t.Errorf("Expected status 'failed', got '%s'", updatedJob.Status)
+	}
+}
+
+func TestNackRetriesJobWhenRetriesRemain(t *testing.T) {
+	ctx := context.Background()
+	mockStore := NewMockJobStore()
+	mockOps := NewMockQueueOperations()
+	mockMetrics := NewMockQueueMetrics()
+	q := NewQueue(mockStore, mockOps, mockMetrics)
+
+	jobID := "test-job-1"
+	job := &jobpkg.Job{
+		ID:         jobID,
+		Type:       "email",
+		Status:     "running",
+		Priority:   3,
+		MaxRetries: 3,
+	}
+
+	mockStore.StoreJob(ctx, job)
+	mockOps.AddToRunning(ctx, job)
+
+	err := q.Nack(ctx, jobID, "rate limited")
+	if err != nil {
+		t.Fatalf("Nack failed: %v", err)
+	}
+
+	// Should NOT be in the failed set - retries remain
+	if _, ok := mockOps.failed[jobID]; ok {
+		t.Error("Job should not be in failed set while retries remain")
+	}
+
+	// Should be back in pending
+	if len(mockOps.pending) != 1 || mockOps.pending[0].ID != jobID {
+		t.Errorf("expected job to be re-added to pending, got pending=%v", mockOps.pending)
+	}
+
+	// Retry count should have incremented
+	updatedJob, _ := mockStore.GetJob(ctx, jobID)
+	if updatedJob.Retries != 1 {
+		t.Errorf("expected Retries=1, got %d", updatedJob.Retries)
+	}
+	if updatedJob.Status != "pending" {
+		t.Errorf("expected status 'pending', got %q", updatedJob.Status)
+	}
+}
+
+func TestNackFailsJobOnceRetriesExhausted(t *testing.T) {
+	ctx := context.Background()
+	mockStore := NewMockJobStore()
+	mockOps := NewMockQueueOperations()
+	mockMetrics := NewMockQueueMetrics()
+	q := NewQueue(mockStore, mockOps, mockMetrics)
+
+	jobID := "test-job-1"
+	job := &jobpkg.Job{
+		ID:         jobID,
+		Type:       "email",
+		Status:     "running",
+		MaxRetries: 2,
+	}
+	mockStore.StoreJob(ctx, job)
+
+	// Nack it MaxRetries times: each one increments Retries and, while
+	// the new count is still < MaxRetries, re-enqueues instead of
+	// failing. The MaxRetries-th Nack is the one where the incremented
+	// count finally reaches MaxRetries and the job fails permanently.
+	for i := 0; i < job.MaxRetries; i++ {
+		mockOps.AddToRunning(ctx, job)
+		if err := q.Nack(ctx, jobID, "still failing"); err != nil {
+			t.Fatalf("Nack #%d failed: %v", i+1, err)
+		}
+
+		updatedJob, _ := mockStore.GetJob(ctx, jobID)
+		isLastAttempt := i == job.MaxRetries-1
+		_, failed := mockOps.failed[jobID]
+		if failed != isLastAttempt {
+			t.Errorf("Nack #%d: expected failed=%v, got %v (Retries=%d)", i+1, isLastAttempt, failed, updatedJob.Retries)
+		}
+	}
+
+	updatedJob, _ := mockStore.GetJob(ctx, jobID)
+	if updatedJob.Status != "failed" {
+		t.Errorf("expected status 'failed', got %q", updatedJob.Status)
+	}
+	if updatedJob.Retries != job.MaxRetries {
+		t.Errorf("expected Retries=%d once permanently failed, got %d", job.MaxRetries, updatedJob.Retries)
 	}
 }
 
