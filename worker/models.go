@@ -9,6 +9,13 @@ const (
 	JobTypeSupervisor = "supervisor"
 )
 
+// SupervisorDoneSignal mirrors engine.SupervisorDoneSignal. Kept as a
+// local constant rather than importing axon-engine, for the same
+// reason as the job type constants above - this value is part of the
+// wire contract (it flows through StepPayload/WebhookPayload as plain
+// text), not an internal engine detail the worker needs the package for.
+const SupervisorDoneSignal = "done"
+
 type JobResponse struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
@@ -16,11 +23,12 @@ type JobResponse struct {
 }
 
 type StepPayload struct {
-	RunID     string `json:"run_id"`
-	StepID    string `json:"step_id"`
-	AgentName string `json:"agent_name"`
-	Tool      string `json:"tool,omitempty"` // which tool to dispatch to, for tool_call steps
-	Input     string `json:"input"`
+	RunID     string   `json:"run_id"`
+	StepID    string   `json:"step_id"`
+	AgentName string   `json:"agent_name"`
+	Tool      string   `json:"tool,omitempty"`    // which tool to dispatch to, for tool_call steps
+	Options   []string `json:"options,omitempty"` // the valid choices (excluding "done"), for supervisor steps
+	Input     string   `json:"input"`
 }
 
 type WebhookPayload struct {

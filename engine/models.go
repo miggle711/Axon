@@ -95,11 +95,12 @@ type Run struct {
 
 // StepPayload represents the data payload for a single step in the workflow
 type StepPayload struct {
-	RunID     string `json:"run_id"`
-	StepID    string `json:"step_id"`
-	AgentName string `json:"agent_name"`
-	Tool      string `json:"tool,omitempty"` // which tool to dispatch to, for tool_call steps
-	Input     string `json:"input"`
+	RunID     string   `json:"run_id"`
+	StepID    string   `json:"step_id"`
+	AgentName string   `json:"agent_name"`
+	Tool      string   `json:"tool,omitempty"`    // which tool to dispatch to, for tool_call steps
+	Options   []string `json:"options,omitempty"` // the valid choices (excluding "done"), for supervisor steps
+	Input     string   `json:"input"`
 }
 
 // WebhookPayload (what workers POST back):

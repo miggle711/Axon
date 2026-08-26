@@ -42,12 +42,13 @@ func main() {
 
 	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
 		groqClient := llm.NewGroqClient(apiKey, *groqModel, httpClient)
-		llmRunner := newLLMRunner(groqClient)
-		runners[worker.JobTypeLLMCall] = llmRunner
-		// supervisor steps are decided by the same prompt-in/text-out
-		// call as llm_call; the engine is what interprets the output
-		// as a routing decision, not the worker.
-		runners[worker.JobTypeSupervisor] = llmRunner
+		runners[worker.JobTypeLLMCall] = newLLMRunner(groqClient)
+		// supervisor steps use Decide, not Complete: the model is
+		// constrained (via Groq's JSON mode) to answer with one of
+		// payload.Options or "done", instead of free text the engine
+		// then has to exact-match against unaided (#39's finding:
+		// prompt-only constraint works but has no structural guarantee).
+		runners[worker.JobTypeSupervisor] = newSupervisorRunner(groqClient)
 	} else {
 		log.Printf("GROQ_API_KEY not set: llm_call and supervisor jobs will be nacked until it is provided")
 	}
@@ -207,5 +208,20 @@ func newLLMRunner(client llm.Client) StepRunner {
 			return "", fmt.Errorf("llm_call: %w", err)
 		}
 		return output, nil
+	}
+}
+
+// newSupervisorRunner returns a StepRunner that asks client to choose
+// exactly one of payload.Options or SupervisorDoneSignal, using
+// Decide's structured-output constraint rather than a plain Complete
+// call the engine would then have to exact-match unaided.
+func newSupervisorRunner(client llm.Client) StepRunner {
+	return func(ctx context.Context, payload worker.StepPayload) (string, error) {
+		choices := append(append([]string{}, payload.Options...), worker.SupervisorDoneSignal)
+		decision, err := client.Decide(ctx, payload.Input, choices)
+		if err != nil {
+			return "", fmt.Errorf("supervisor: %w", err)
+		}
+		return decision, nil
 	}
 }
