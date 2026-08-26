@@ -1,6 +1,6 @@
 {
   "name": "research_agent",
-  "description": "Searches the web for the user's query via Tavily, then uses an LLM to synthesize an answer from the results. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker.",
+  "description": "Searches the web via Tavily, has an LLM supervisor judge whether the results are sufficient (re-searching up to the iteration cap if not), then synthesizes a final answer. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker. Built for #39: exercises supervisor against real, unpredictable LLM output rather than simulated test payloads.",
   "output_step": "answer",
   "steps": [
     {
@@ -11,10 +11,17 @@
       "depends_on": []
     },
     {
+      "id": "judge",
+      "type": "supervisor",
+      "prompt_template": "You are deciding whether web search results are sufficient to answer a question. You will be asked this repeatedly as new searches run.\n\nQuestion: {{user_input}}\n\nMost recent search results:\n{{search.output}}\n\nRules:\n- The very first time you are asked this (before any additional search has run beyond the original one), always respond with exactly: search\n- On every later time you are asked, if the results so far are sufficient to answer the question, respond with exactly: done\n- Otherwise, respond with exactly: search\n\nRespond with only one of those two words, nothing else.",
+      "options": ["search"],
+      "depends_on": ["search"]
+    },
+    {
       "id": "answer",
       "type": "llm_call",
-      "prompt_template": "Answer the question using only the search results below. Be concise.\n\nQuestion: {{user_input}}\n\nSearch results:\n{{search.output}}",
-      "depends_on": ["search"]
+      "prompt_template": "Answer the question using only the search results below. Be concise.\n\nQuestion: {{user_input}}\n\nSearch results:\n{{judge.output}}",
+      "depends_on": ["judge"]
     }
   ]
 }

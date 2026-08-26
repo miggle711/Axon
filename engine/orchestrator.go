@@ -446,6 +446,7 @@ func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context,
 			StepID:    supervisorStep.ID,
 			AgentName: run.AgentName,
 			Tool:      supervisorStep.Tool,
+			Options:   supervisorStep.Options,
 			Input:     resolveStepInput(supervisorStep, run),
 		}, 1)
 	if err != nil {
