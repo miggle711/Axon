@@ -153,7 +153,7 @@ func TestEnqueueStoresJob(t *testing.T) {
 	// Verify job was stored
 	storedJob, _ := mockStore.GetJob(ctx, job.ID)
 	if storedJob == nil {
-		t.Error("Job was not stored")
+		t.Fatal("Job was not stored")
 	}
 	if storedJob.ID != job.ID {
 		t.Errorf("Expected job ID %s, got %s", job.ID, storedJob.ID)
@@ -175,7 +175,9 @@ func TestDequeueMovesJobToRunning(t *testing.T) {
 	}
 
 	// First enqueue
-	q.Enqueue(ctx, job)
+	if err := q.Enqueue(ctx, job); err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
 
 	// Then dequeue
 	dequeuedJob, err := q.Dequeue(ctx)
@@ -207,8 +209,8 @@ func TestAckMarksJobCompleted(t *testing.T) {
 		Status: "running",
 	}
 
-	mockStore.StoreJob(ctx, job)
-	mockOps.AddToRunning(ctx, job)
+	_ = mockStore.StoreJob(ctx, job)
+	_ = mockOps.AddToRunning(ctx, job)
 
 	err := q.Ack(ctx, jobID)
 	if err != nil {
@@ -242,8 +244,8 @@ func TestNackMarksJobFailed_NoRetriesConfigured(t *testing.T) {
 		MaxRetries: 0, // no retries allowed, so the first Nack fails it permanently
 	}
 
-	mockStore.StoreJob(ctx, job)
-	mockOps.AddToRunning(ctx, job)
+	_ = mockStore.StoreJob(ctx, job)
+	_ = mockOps.AddToRunning(ctx, job)
 
 	err := q.Nack(ctx, jobID, "timeout")
 	if err != nil {
@@ -283,8 +285,8 @@ func TestNackRetriesJobWhenRetriesRemain(t *testing.T) {
 		MaxRetries: 3,
 	}
 
-	mockStore.StoreJob(ctx, job)
-	mockOps.AddToRunning(ctx, job)
+	_ = mockStore.StoreJob(ctx, job)
+	_ = mockOps.AddToRunning(ctx, job)
 
 	err := q.Nack(ctx, jobID, "rate limited")
 	if err != nil {
@@ -325,14 +327,14 @@ func TestNackFailsJobOnceRetriesExhausted(t *testing.T) {
 		Status:     "running",
 		MaxRetries: 2,
 	}
-	mockStore.StoreJob(ctx, job)
+	_ = mockStore.StoreJob(ctx, job)
 
 	// Nack it MaxRetries times: each one increments Retries and, while
 	// the new count is still < MaxRetries, re-enqueues instead of
 	// failing. The MaxRetries-th Nack is the one where the incremented
 	// count finally reaches MaxRetries and the job fails permanently.
 	for i := 0; i < job.MaxRetries; i++ {
-		mockOps.AddToRunning(ctx, job)
+		_ = mockOps.AddToRunning(ctx, job)
 		if err := q.Nack(ctx, jobID, "still failing"); err != nil {
 			t.Fatalf("Nack #%d failed: %v", i+1, err)
 		}
@@ -368,7 +370,7 @@ func TestGetJobStatus(t *testing.T) {
 		Status: "pending",
 	}
 
-	mockStore.StoreJob(ctx, job)
+	_ = mockStore.StoreJob(ctx, job)
 
 	status, err := q.GetJobStatus(ctx, jobID)
 	if err != nil {
@@ -475,7 +477,7 @@ func TestEnqueueMultipleJobs(t *testing.T) {
 
 			stored, _ := mockStore.GetJob(ctx, tt.jobID)
 			if stored == nil {
-				t.Error("Job not stored")
+				t.Fatal("Job not stored")
 			}
 			if stored.Type != tt.jobType {
 				t.Errorf("Expected type %s, got %s", tt.jobType, stored.Type)
@@ -502,6 +504,8 @@ func BenchmarkEnqueue(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		job.ID = "bench-job-" + string(rune(i))
-		q.Enqueue(ctx, job)
+		if err := q.Enqueue(ctx, job); err != nil {
+			b.Fatalf("Enqueue failed: %v", err)
+		}
 	}
 }
