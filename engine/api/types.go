@@ -5,10 +5,15 @@ import (
 	engine "axon-engine"
 )
 
-// CreateRunRequest is what the client sends to POST /runs
+// CreateRunRequest is what the client sends to POST /runs. Exactly one
+// of AgentName or Definition must be set: AgentName resolves via the
+// server's AgentRegistry (see #40 - lets a client like the CLI start a
+// run without needing its own access to agent definitions), Definition
+// is used inline as before.
 type CreateRunRequest struct {
-	Definition engine.AgentDefinition `json:"definition" binding:"required"`
-	Input      string                 `json:"input" binding:"required"`
+	AgentName  string                  `json:"agent_name,omitempty"`
+	Definition *engine.AgentDefinition `json:"definition,omitempty"`
+	Input      string                  `json:"input" binding:"required"`
 }
 
 type ErrorResponse struct {
