@@ -325,6 +325,46 @@ func TestAgentCall_ErrorCases(t *testing.T) {
 	})
 }
 
+// TestCreateRunByName covers #40's need for the CLI (or any caller
+// without its own access to agent definitions) to start a run by name
+// alone, resolving via the orchestrator's own AgentRegistry.
+func TestCreateRunByName(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	def := AgentDefinition{
+		Name:  "greeter",
+		Steps: []StepDefinition{{ID: "greet", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "hi {{user_input}}", DependsOn: []string{}}},
+	}
+	registry := MapAgentRegistry{"greeter": def}
+	orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry)
+
+	run, err := orchestrator.CreateRunByName(context.Background(), "greeter", "world")
+	if err != nil {
+		t.Fatalf("CreateRunByName failed: %v", err)
+	}
+	if run.AgentName != "greeter" {
+		t.Errorf("expected AgentName 'greeter', got %q", run.AgentName)
+	}
+	if run.UserInput != "world" {
+		t.Errorf("expected UserInput 'world', got %q", run.UserInput)
+	}
+	if _, enqueued := run.EnqueuedSteps["greet"]; !enqueued {
+		t.Errorf("expected greet to be enqueued, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+}
+
+func TestCreateRunByName_UnknownAgent(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{})
+	_, err := orchestrator.CreateRunByName(context.Background(), "does_not_exist", "input")
+	if err == nil {
+		t.Fatal("expected an error for an unregistered agent name, got none")
+	}
+}
+
 // supervisorTestAgentSteps builds a supervisor step with two Options,
 // each a tool_call that depends on the supervisor and produces a
 // distinguishable output, plus a final step depending on the

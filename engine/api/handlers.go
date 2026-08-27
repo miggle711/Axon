@@ -52,7 +52,20 @@ func (s *Server) createRunHandler(c *gin.Context) {
 		return
 	}
 
-	run, err := s.orchestrator.CreateRun(c.Request.Context(), request.Definition, request.Input)
+	hasAgentName := request.AgentName != ""
+	hasDefinition := request.Definition != nil
+	if hasAgentName == hasDefinition { // both set, or neither set
+		c.JSON(400, ErrorResponse{Error: "Exactly one of agent_name or definition is required", Code: 400})
+		return
+	}
+
+	var run *engine.Run
+	var err error
+	if hasAgentName {
+		run, err = s.orchestrator.CreateRunByName(c.Request.Context(), request.AgentName, request.Input)
+	} else {
+		run, err = s.orchestrator.CreateRun(c.Request.Context(), *request.Definition, request.Input)
+	}
 	if err != nil {
 		c.JSON(500, ErrorResponse{Error: "Failed to create run", Code: 500})
 		return

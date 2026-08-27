@@ -112,6 +112,21 @@ func (orchestrator *Orchestrator) CreateRun(ctx context.Context, definition Agen
 	return orchestrator.createRun(ctx, definition, userInput, "", "")
 }
 
+// CreateRunByName resolves agentName via the orchestrator's
+// AgentRegistry and creates a run for it, so a caller (e.g. the CLI)
+// doesn't need its own access to agent definitions, only the engine
+// needs to know how agents are loaded/stored.
+func (orchestrator *Orchestrator) CreateRunByName(ctx context.Context, agentName, userInput string) (*Run, error) {
+	if orchestrator.agents == nil {
+		return nil, fmt.Errorf("no agent registry configured")
+	}
+	definition, ok := orchestrator.agents.Get(agentName)
+	if !ok {
+		return nil, fmt.Errorf("unknown agent %q", agentName)
+	}
+	return orchestrator.createRun(ctx, definition, userInput, "", "")
+}
+
 // createRun is CreateRun's implementation, additionally accepting
 // parentRunID/parentStepID so agent_call can spawn a child run that
 // knows where to propagate its completion back to.
