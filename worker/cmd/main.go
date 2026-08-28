@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -17,6 +17,7 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
 
 	// Parse command-line flags for the queue and engine service URLs
@@ -33,7 +34,7 @@ func main() {
 	if apiKey := os.Getenv("TAVILY_API_KEY"); apiKey != "" {
 		toolRegistry["tavily_search"] = tools.NewTavilySearch(apiKey, httpClient)
 	} else {
-		log.Printf("TAVILY_API_KEY not set: tavily_search tool_call steps will be nacked until it is provided")
+		logger.Warn("TAVILY_API_KEY not set: tavily_search tool_call steps will be nacked until it is provided")
 	}
 
 	runners := map[string]StepRunner{
@@ -50,25 +51,25 @@ func main() {
 		// prompt-only constraint works but has no structural guarantee).
 		runners[worker.JobTypeSupervisor] = newSupervisorRunner(groqClient)
 	} else {
-		log.Printf("GROQ_API_KEY not set: llm_call and supervisor jobs will be nacked until it is provided")
+		logger.Warn("GROQ_API_KEY not set: llm_call and supervisor jobs will be nacked until it is provided")
 	}
 
 	for {
-		pollOnce(ctx, httpClient, *queueURL, *engineURL, runners)
+		pollOnce(ctx, httpClient, *queueURL, *engineURL, runners, logger)
 	}
 
 }
 
-func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL string, runners map[string]StepRunner) {
+func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL string, runners map[string]StepRunner, logger *slog.Logger) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queueURL+"/jobs/next", nil)
 	if err != nil {
-		log.Printf("failed to build request: %v", err)
+		logger.Error("failed to build request", "error", err)
 		return
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Printf("failed to poll queue: %v", err)
+		logger.Error("failed to poll queue", "error", err)
 		time.Sleep(time.Second)
 		return
 	}
@@ -80,47 +81,53 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("unexpected status from queue: %d", resp.StatusCode)
+		logger.Error("unexpected status from queue", "status", resp.StatusCode)
 		time.Sleep(time.Second)
 		return
 	}
 
 	var job worker.JobResponse
 	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-		log.Printf("failed to decode job: %v", err)
+		logger.Error("failed to decode job", "error", err)
 		return
 	}
 
 	var payload worker.StepPayload
 	if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil {
-		log.Printf("failed to unmarshal job payload: %v", err)
+		logger.Error("failed to unmarshal job payload", "job_id", job.ID, "error", err)
 		return
 	}
+
+	// Every log line from here on carries run_id/step_id, so a run's
+	// activity can be grepped out of the worker's logs the same way as
+	// the engine's (see #38).
+	log := logger.With("run_id", payload.RunID, "step_id", payload.StepID, "job_id", job.ID)
+	log.Info("dequeued job", "job_type", job.Type)
 
 	runner, ok := runners[job.Type]
 	if !ok {
 		reason := fmt.Sprintf("unsupported job type: %s", job.Type)
-		log.Printf("failed to run step %s: %s", payload.StepID, reason)
-		nackJob(ctx, httpClient, queueURL, job.ID, reason)
+		log.Error("failed to run step", "reason", reason)
+		nackJob(ctx, httpClient, queueURL, job.ID, reason, log)
 		return
 	}
 
 	output, err := runner(ctx, payload)
 	if err != nil {
-		log.Printf("failed to run step %s: %v", payload.StepID, err)
-		nackJob(ctx, httpClient, queueURL, job.ID, err.Error())
+		log.Error("failed to run step", "error", err)
+		nackJob(ctx, httpClient, queueURL, job.ID, err.Error(), log)
 		return
 	}
 
 	// Ack the job with the queue
 	ackReq, err := http.NewRequestWithContext(ctx, http.MethodPost, queueURL+"/jobs/"+job.ID+"/ack", nil)
 	if err != nil {
-		log.Printf("failed to build ack request: %v", err)
+		log.Error("failed to build ack request", "error", err)
 		return
 	}
 	ackResp, err := httpClient.Do(ackReq)
 	if err != nil {
-		log.Printf("failed to ack job: %v", err)
+		log.Error("failed to ack job", "error", err)
 		return
 	}
 	_ = ackResp.Body.Close()
@@ -133,45 +140,45 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	}
 	webhookJSON, err := json.Marshal(webhookPayload)
 	if err != nil {
-		log.Printf("failed to marshal webhook payload: %v", err)
+		log.Error("failed to marshal webhook payload", "error", err)
 		return
 	}
 
 	webhookReq, err := http.NewRequestWithContext(ctx, http.MethodPost, engineURL+"/webhook/complete", bytes.NewReader(webhookJSON))
 	if err != nil {
-		log.Printf("failed to build webhook request: %v", err)
+		log.Error("failed to build webhook request", "error", err)
 		return
 	}
 	webhookReq.Header.Set("Content-Type", "application/json")
 	webhookResp, err := httpClient.Do(webhookReq)
 	if err != nil {
-		log.Printf("failed to notify engine: %v", err)
+		log.Error("failed to notify engine", "error", err)
 		return
 	}
 	_ = webhookResp.Body.Close()
 
-	log.Printf("processed step %s for run %s", payload.StepID, payload.RunID)
+	log.Info("processed step")
 }
 
 // nackJob marks a job as failed with the queue so it can be retried or
 // surfaced as an error instead of sitting stuck in the running set.
-func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reason string) {
+func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reason string, log *slog.Logger) {
 	body, err := json.Marshal(map[string]string{"reason": reason})
 	if err != nil {
-		log.Printf("failed to marshal nack request: %v", err)
+		log.Error("failed to marshal nack request", "error", err)
 		return
 	}
 
 	nackReq, err := http.NewRequestWithContext(ctx, http.MethodPost, queueURL+"/jobs/"+jobID+"/fail", bytes.NewReader(body))
 	if err != nil {
-		log.Printf("failed to build nack request: %v", err)
+		log.Error("failed to build nack request", "error", err)
 		return
 	}
 	nackReq.Header.Set("Content-Type", "application/json")
 
 	nackResp, err := httpClient.Do(nackReq)
 	if err != nil {
-		log.Printf("failed to nack job: %v", err)
+		log.Error("failed to nack job", "error", err)
 		return
 	}
 	_ = nackResp.Body.Close()
