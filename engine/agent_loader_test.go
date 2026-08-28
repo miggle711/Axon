@@ -89,7 +89,7 @@ func TestAgentsDir_GreeterCallerEndToEnd(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry)
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry, discardLogger)
 
 	ctx := context.Background()
 	run, err := orchestrator.CreateRun(ctx, callerDef, "world")
