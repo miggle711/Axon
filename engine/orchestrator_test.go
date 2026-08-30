@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 )
+
+// discardLogger silences log output for tests that don't assert on it.
+var discardLogger = slog.New(slog.DiscardHandler)
 
 // fakeRunStore is an in-memory RunStore for testing, avoiding a real
 // Redis dependency.
@@ -111,7 +115,7 @@ func TestOnStepCompleted_ConditionalRouting(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 
 	agent := AgentDefinition{
 		Name:  "conditional_test_agent",
@@ -211,7 +215,7 @@ func TestAgentCall_SpawnsChildRunAndPropagatesCompletion(t *testing.T) {
 	}
 	registry := MapAgentRegistry{"child_agent": childAgent}
 
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry)
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry, discardLogger)
 
 	parentAgent := AgentDefinition{
 		Name: "parent_agent",
@@ -291,7 +295,7 @@ func TestAgentCall_ErrorCases(t *testing.T) {
 	}
 
 	t.Run("unknown agent", func(t *testing.T) {
-		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{})
+		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
 		if err == nil {
 			t.Fatal("expected an error for an unregistered agent, got none")
@@ -304,7 +308,7 @@ func TestAgentCall_ErrorCases(t *testing.T) {
 			Steps: []StepDefinition{{ID: "child_step", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}}},
 			// OutputStep intentionally unset
 		}}
-		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry)
+		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry, discardLogger)
 		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
 		if err == nil {
 			t.Fatal("expected an error for a child agent with no output_step, got none")
@@ -317,7 +321,7 @@ func TestAgentCall_ErrorCases(t *testing.T) {
 			OutputStep: "does_not_exist",
 			Steps:      []StepDefinition{{ID: "child_step", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}}},
 		}}
-		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry)
+		orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry, discardLogger)
 		_, err := orchestrator.CreateRun(context.Background(), AgentDefinition{Name: "parent", Steps: agentCallStep()}, "start")
 		if err == nil {
 			t.Fatal("expected an error for an output_step that doesn't match any step ID, got none")
@@ -337,7 +341,7 @@ func TestCreateRunByName(t *testing.T) {
 		Steps: []StepDefinition{{ID: "greet", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "hi {{user_input}}", DependsOn: []string{}}},
 	}
 	registry := MapAgentRegistry{"greeter": def}
-	orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry)
+	orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), registry, discardLogger)
 
 	run, err := orchestrator.CreateRunByName(context.Background(), "greeter", "world")
 	if err != nil {
@@ -358,7 +362,7 @@ func TestCreateRunByName_UnknownAgent(t *testing.T) {
 	server := newFakeQueueServer(t)
 	defer server.Close()
 
-	orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{})
+	orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 	_, err := orchestrator.CreateRunByName(context.Background(), "does_not_exist", "input")
 	if err == nil {
 		t.Fatal("expected an error for an unregistered agent name, got none")
@@ -411,7 +415,7 @@ func TestSupervisor_LoopsAndStops(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 
 	agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
 
@@ -515,7 +519,7 @@ func TestSupervisor_IterationCap(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 
 	agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
 
@@ -566,7 +570,7 @@ func TestSupervisor_ErrorCases(t *testing.T) {
 
 	newOrchestrator := func() (*Orchestrator, *Run) {
 		store := newFakeRunStore()
-		orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+		orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 		agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
 		run, err := orchestrator.CreateRun(context.Background(), agent, "start")
 		if err != nil {
@@ -706,7 +710,7 @@ func TestOnStepCompleted_ConcurrentCallsDoNotLoseUpdates(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeRunStore()
-	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{})
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
 
 	agent := AgentDefinition{
 		Name: "concurrent_test_agent",

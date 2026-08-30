@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ type Orchestrator struct {
 	store       RunStore
 	queueClient *QueueClient
 	agents      AgentRegistry
+	logger      *slog.Logger
 
 	// runLocks holds one mutex per run ID, serializing
 	// OnStepCompleted per run. Process-local only.
@@ -21,11 +23,12 @@ type Orchestrator struct {
 	runLocks   map[string]*sync.Mutex
 }
 
-func NewOrchestrator(store RunStore, queueClient *QueueClient, agents AgentRegistry) *Orchestrator {
+func NewOrchestrator(store RunStore, queueClient *QueueClient, agents AgentRegistry, logger *slog.Logger) *Orchestrator {
 	return &Orchestrator{
 		store:       store,
 		queueClient: queueClient,
 		agents:      agents,
+		logger:      logger,
 		runLocks:    make(map[string]*sync.Mutex),
 	}
 }
@@ -132,6 +135,7 @@ func (orchestrator *Orchestrator) CreateRunByName(ctx context.Context, agentName
 // knows where to propagate its completion back to.
 func (orchestrator *Orchestrator) createRun(ctx context.Context, definition AgentDefinition, userInput string, parentRunID, parentStepID string) (*Run, error) {
 	if err := validateAgentDefinition(definition); err != nil {
+		orchestrator.logger.Error("invalid agent definition", "agent_name", definition.Name, "error", err)
 		return nil, fmt.Errorf("invalid agent definition: %w", err)
 	}
 
@@ -139,6 +143,8 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 	if err != nil {
 		return nil, err
 	}
+	log := orchestrator.logger.With("run_id", id.String(), "agent_name", definition.Name)
+	log.Info("creating run", "parent_run_id", parentRunID, "parent_step_id", parentStepID)
 
 	// Initialize the Run struct with the provided definition and user input
 	run := &Run{
@@ -174,6 +180,7 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 			if step.Type == StepTypeConditional {
 				result, err := evaluateCondition(step.Condition, run)
 				if err != nil {
+					log.Error("failed to evaluate condition", "step_id", step.ID, "error", err)
 					return nil, fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
 				}
 
@@ -185,6 +192,7 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 				// winner may be "" if that branch intentionally does nothing
 				run.StepResults[step.ID] = winner
 				run.CompletedSteps = append(run.CompletedSteps, step.ID)
+				log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
 
 				if loser != "" {
 					run.SkippedSteps = append(run.SkippedSteps, loser)
@@ -198,9 +206,11 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 			if step.Type == StepTypeAgentCall {
 				childRun, err := orchestrator.spawnChildRun(ctx, step, run)
 				if err != nil {
+					log.Error("failed to spawn child run", "step_id", step.ID, "error", err)
 					return nil, fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
 				}
 				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
+				log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
 				changed = true
 				continue
 			}
@@ -217,9 +227,11 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 					Input:     resolveStepInput(step, run),
 				}, 1) // TODO: Default priority set to 1 for initial steps
 			if err != nil {
+				log.Error("failed to enqueue step", "step_id", step.ID, "step_type", step.Type, "error", err)
 				return nil, fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
 			}
 			run.EnqueuedSteps[step.ID] = jobID
+			log.Info("step enqueued", "step_id", step.ID, "step_type", step.Type, "job_id", jobID)
 			changed = true
 		}
 		if !changed {
@@ -229,6 +241,7 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 
 	// save the run to the store
 	if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+		log.Error("failed to save run", "error", err)
 		return nil, fmt.Errorf("failed to save run: %v", err)
 	}
 
@@ -239,16 +252,21 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 // a child run for it, with parent.ID/step.ID as the child's
 // ParentRunID/ParentStepID so its completion can propagate back.
 func (orchestrator *Orchestrator) spawnChildRun(ctx context.Context, step StepDefinition, parent *Run) (*Run, error) {
+	log := orchestrator.logger.With("run_id", parent.ID, "step_id", step.ID)
+
 	if orchestrator.agents == nil {
+		log.Error("agent_call failed: no agent registry configured")
 		return nil, fmt.Errorf("no agent registry configured")
 	}
 
 	childDef, ok := orchestrator.agents.Get(step.Agent)
 	if !ok {
+		log.Error("agent_call failed: unknown agent", "agent_name", step.Agent)
 		return nil, fmt.Errorf("unknown agent %q", step.Agent)
 	}
 
 	if childDef.OutputStep == "" {
+		log.Error("agent_call failed: agent has no output_step set", "agent_name", step.Agent)
 		return nil, fmt.Errorf("agent %q has no output_step set, required to be called via agent_call", step.Agent)
 	}
 	hasOutputStep := false
@@ -259,6 +277,7 @@ func (orchestrator *Orchestrator) spawnChildRun(ctx context.Context, step StepDe
 		}
 	}
 	if !hasOutputStep {
+		log.Error("agent_call failed: output_step does not match any step ID", "agent_name", step.Agent, "output_step", childDef.OutputStep)
 		return nil, fmt.Errorf("agent %q's output_step %q does not match any step ID", step.Agent, childDef.OutputStep)
 	}
 
@@ -271,6 +290,9 @@ func (orchestrator *Orchestrator) GetRun(ctx context.Context, runID string) (*Ru
 }
 
 func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload WebhookPayload) error {
+	log := orchestrator.logger.With("run_id", payload.RunID, "step_id", payload.StepID)
+	log.Info("step completed", "output_preview", previewText(payload.Output))
+
 	lock := orchestrator.lockFor(payload.RunID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -278,6 +300,7 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 	// Retrieve the run from the store
 	run, err := orchestrator.store.GetRun(ctx, payload.RunID)
 	if err != nil {
+		log.Error("failed to retrieve run", "error", err)
 		return fmt.Errorf("failed to retrieve run: %v", err)
 	}
 
@@ -302,12 +325,15 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 		if chosen != payload.StepID {
 			continue
 		}
+		log.Info("option step completed, re-invoking supervisor", "supervisor_step_id", supervisorID)
 		run.StepResults[payload.StepID] = payload.Output
 		if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+			log.Error("failed to save updated run", "error", err)
 			return fmt.Errorf("failed to save updated run: %v", err)
 		}
 		supervisorStep, ok := findStep(run.Steps, supervisorID)
 		if !ok {
+			log.Error("active supervisor step not found in run.Steps", "supervisor_step_id", supervisorID)
 			return fmt.Errorf("active supervisor step %s not found in run.Steps", supervisorID)
 		}
 		return orchestrator.enqueueSupervisorDecision(ctx, run, supervisorStep)
@@ -318,6 +344,16 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 	return orchestrator.finalizeStepCompletion(ctx, run)
 }
 
+// previewText truncates s for log output, so a long tool/LLM output
+// doesn't dominate a log line.
+func previewText(s string) string {
+	const maxLen = 200
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // finalizeStepCompletion runs the shared tail of a step's completion:
 // resolving any newly-unblocked steps (or supervisor decisions,
 // conditionals, agent_call spawns), recomputing run status, saving, and
@@ -325,6 +361,8 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 // via agent_call. Called both by OnStepCompleted's normal path and by
 // handleSupervisorDecision once a supervisor loop actually stops.
 func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, run *Run) error {
+	log := orchestrator.logger.With("run_id", run.ID)
+
 	// Check if any dependent steps can now be enqueued or, for
 	// conditionals, resolved. Repeats until a full pass makes no
 	// further progress, since resolving a conditional can unblock a
@@ -339,6 +377,7 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 			if step.Type == StepTypeConditional {
 				result, err := evaluateCondition(step.Condition, run)
 				if err != nil {
+					log.Error("failed to evaluate condition", "step_id", step.ID, "error", err)
 					return fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
 				}
 
@@ -350,6 +389,7 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 				// winner may be "" if that branch intentionally does nothing
 				run.StepResults[step.ID] = winner
 				run.CompletedSteps = append(run.CompletedSteps, step.ID)
+				log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
 
 				if loser != "" {
 					run.SkippedSteps = append(run.SkippedSteps, loser)
@@ -363,15 +403,18 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 			if step.Type == StepTypeAgentCall {
 				childRun, err := orchestrator.spawnChildRun(ctx, step, run)
 				if err != nil {
+					log.Error("failed to spawn child run", "step_id", step.ID, "error", err)
 					return fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
 				}
 				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
+				log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
 				changed = true
 				continue
 			}
 
 			if step.Type == StepTypeSupervisor {
 				if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
+					log.Error("failed to enqueue supervisor decision", "step_id", step.ID, "error", err)
 					return err
 				}
 				changed = true
@@ -390,9 +433,11 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 					Input:     resolveStepInput(step, run),
 				}, 1) // TODO: Default priority set to 1 for subsequent steps
 			if err != nil {
+				log.Error("failed to enqueue step", "step_id", step.ID, "step_type", step.Type, "error", err)
 				return fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
 			}
 			run.EnqueuedSteps[step.ID] = jobID
+			log.Info("step enqueued", "step_id", step.ID, "step_type", step.Type, "job_id", jobID)
 			changed = true
 		}
 		if !changed {
@@ -413,7 +458,12 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 
 	// Save the updated run back to the store
 	if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+		log.Error("failed to save updated run", "error", err)
 		return fmt.Errorf("failed to save updated run: %v", err)
+	}
+
+	if run.Status == "completed" {
+		log.Info("run completed")
 	}
 
 	// If this run was spawned by an agent_call step and has now
@@ -424,8 +474,10 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 	if run.Status == "completed" && run.ParentRunID != "" {
 		agentDef, ok := orchestrator.agents.Get(run.AgentName)
 		if !ok {
+			log.Error("failed to propagate child run completion: unknown agent", "agent_name", run.AgentName)
 			return fmt.Errorf("failed to propagate child run %s completion: unknown agent %q", run.ID, run.AgentName)
 		}
+		log.Info("propagating child run completion to parent", "parent_run_id", run.ParentRunID, "parent_step_id", run.ParentStepID)
 		return orchestrator.OnStepCompleted(ctx, WebhookPayload{
 			RunID:  run.ParentRunID,
 			StepID: run.ParentStepID,
@@ -453,6 +505,8 @@ func findStep(steps []StepDefinition, stepID string) (StepDefinition, bool) {
 // recognizes it as a supervisor step and routes to
 // handleSupervisorDecision instead of normal DAG progression.
 func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context, run *Run, supervisorStep StepDefinition) error {
+	log := orchestrator.logger.With("run_id", run.ID, "step_id", supervisorStep.ID)
+
 	jobID, err := orchestrator.queueClient.Enqueue(
 		ctx,
 		supervisorStep.Type,
@@ -465,9 +519,11 @@ func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context,
 			Input:     resolveStepInput(supervisorStep, run),
 		}, 1)
 	if err != nil {
+		log.Error("failed to enqueue supervisor decision", "error", err)
 		return fmt.Errorf("failed to enqueue supervisor decision for step %s: %v", supervisorStep.ID, err)
 	}
 	run.EnqueuedSteps[supervisorStep.ID] = jobID
+	log.Info("supervisor decision requested", "iteration", run.SupervisorIterations[supervisorStep.ID], "job_id", jobID)
 	return orchestrator.store.SaveRun(ctx, run)
 }
 
@@ -487,7 +543,9 @@ func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context,
 //     it most likely means the prompt isn't instructing the model
 //     correctly.
 func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, run *Run, supervisorStep StepDefinition, decision string) error {
+	log := orchestrator.logger.With("run_id", run.ID, "step_id", supervisorStep.ID)
 	decision = strings.TrimSpace(decision)
+	log.Info("supervisor decision received", "decision", decision)
 
 	isOption := false
 	for _, opt := range supervisorStep.Options {
@@ -498,6 +556,7 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 	}
 
 	if !isOption && decision != SupervisorDoneSignal {
+		log.Error("supervisor decision did not match any valid option", "decision", decision, "options", supervisorStep.Options)
 		return fmt.Errorf("supervisor step %s: LLM output %q did not match \"%s\" or any of %v",
 			supervisorStep.ID, decision, SupervisorDoneSignal, supervisorStep.Options)
 	}
@@ -507,11 +566,13 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 		run.SupervisorIterations[supervisorStep.ID]++
 		run.ActiveSupervisorChoice[supervisorStep.ID] = decision
 		if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+			log.Error("failed to save updated run", "error", err)
 			return fmt.Errorf("failed to save updated run: %v", err)
 		}
 
 		optionStep, ok := findStep(run.Steps, decision)
 		if !ok {
+			log.Error("chosen option is not a step in this run", "decision", decision)
 			return fmt.Errorf("supervisor step %s: chosen option %q is not a step in this run", supervisorStep.ID, decision)
 		}
 		return orchestrator.enqueueOptionStep(ctx, run, optionStep)
@@ -520,6 +581,7 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 	// Stopping: either the LLM said "done", or an Options pick hit the
 	// iteration cap and is being force-stopped instead of enqueued.
 	if run.SupervisorIterations[supervisorStep.ID] == 0 {
+		log.Error("supervisor said done before any option ran")
 		return fmt.Errorf("supervisor step %s: got %q before any option ran; the prompt must have the model pick an option first",
 			supervisorStep.ID, SupervisorDoneSignal)
 	}
@@ -529,7 +591,15 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 
 	run.StepResults[supervisorStep.ID] = run.StepResults[lastChoice]
 	run.CompletedSteps = append(run.CompletedSteps, supervisorStep.ID)
+	log.Info("supervisor loop stopped", "reason", supervisorStopReason(atCap, decision), "iterations", run.SupervisorIterations[supervisorStep.ID], "last_choice", lastChoice)
 	return orchestrator.finalizeStepCompletion(ctx, run)
+}
+
+func supervisorStopReason(atCap bool, decision string) string {
+	if atCap {
+		return "iteration_cap"
+	}
+	return decision // "done"
 }
 
 // enqueueOptionStep enqueues optionStep the way a normal step is
@@ -537,12 +607,16 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 // reusing the same shape as the main resolve loops in
 // createRun/OnStepCompleted.
 func (orchestrator *Orchestrator) enqueueOptionStep(ctx context.Context, run *Run, optionStep StepDefinition) error {
+	log := orchestrator.logger.With("run_id", run.ID, "step_id", optionStep.ID)
+
 	if optionStep.Type == StepTypeAgentCall {
 		childRun, err := orchestrator.spawnChildRun(ctx, optionStep, run)
 		if err != nil {
+			log.Error("failed to spawn child run for option step", "error", err)
 			return fmt.Errorf("failed to spawn child run for option step %s: %v", optionStep.ID, err)
 		}
 		run.EnqueuedSteps[optionStep.ID] = "run:" + childRun.ID
+		log.Info("option step spawned a child run", "child_run_id", childRun.ID)
 		return orchestrator.store.SaveRun(ctx, run)
 	}
 
@@ -557,9 +631,11 @@ func (orchestrator *Orchestrator) enqueueOptionStep(ctx context.Context, run *Ru
 			Input:     resolveStepInput(optionStep, run),
 		}, 1)
 	if err != nil {
+		log.Error("failed to enqueue option step", "step_type", optionStep.Type, "error", err)
 		return fmt.Errorf("failed to enqueue option step %s: %v", optionStep.ID, err)
 	}
 	run.EnqueuedSteps[optionStep.ID] = jobID
+	log.Info("option step enqueued", "step_type", optionStep.Type, "job_id", jobID)
 	return orchestrator.store.SaveRun(ctx, run)
 }
 

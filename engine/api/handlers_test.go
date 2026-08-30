@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	engine "axon-engine"
 )
+
+// discardLogger silences log output for tests that don't assert on it.
+var discardLogger = slog.New(slog.DiscardHandler)
 
 type fakeRunStore struct {
 	runs map[string]*engine.Run
@@ -43,7 +47,7 @@ func newTestServer(t *testing.T, agents engine.AgentRegistry) *Server {
 	queueServer := newFakeQueueServer(t)
 	t.Cleanup(queueServer.Close)
 
-	orchestrator := engine.NewOrchestrator(newFakeRunStore(), engine.NewQueueClient(queueServer.URL), agents)
+	orchestrator := engine.NewOrchestrator(newFakeRunStore(), engine.NewQueueClient(queueServer.URL), agents, discardLogger)
 	return NewServer(orchestrator)
 }
 
