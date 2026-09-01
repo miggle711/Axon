@@ -108,14 +108,14 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	if !ok {
 		reason := fmt.Sprintf("unsupported job type: %s", job.Type)
 		log.Error("failed to run step", "reason", reason)
-		nackJob(ctx, httpClient, queueURL, job.ID, reason, log)
+		nackJob(ctx, httpClient, queueURL, engineURL, job.ID, payload, reason, log)
 		return
 	}
 
 	output, err := runner(ctx, payload)
 	if err != nil {
 		log.Error("failed to run step", "error", err)
-		nackJob(ctx, httpClient, queueURL, job.ID, err.Error(), log)
+		nackJob(ctx, httpClient, queueURL, engineURL, job.ID, payload, err.Error(), log)
 		return
 	}
 
@@ -160,9 +160,13 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 	log.Info("processed step")
 }
 
-// nackJob marks a job as failed with the queue so it can be retried or
-// surfaced as an error instead of sitting stuck in the running set.
-func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reason string, log *slog.Logger) {
+// nackJob marks a job as failed with the queue, which either retries
+// it (see #37) or, once retries are exhausted, permanently fails it.
+// In the permanent case the queue's response says so, and this tells
+// the engine the step is never coming back (see #47) - otherwise the
+// run would just sit at "in_progress" forever with no indication
+// anything went wrong.
+func nackJob(ctx context.Context, httpClient *http.Client, queueURL, engineURL, jobID string, payload worker.StepPayload, reason string, log *slog.Logger) {
 	body, err := json.Marshal(map[string]string{"reason": reason})
 	if err != nil {
 		log.Error("failed to marshal nack request", "error", err)
@@ -181,7 +185,49 @@ func nackJob(ctx context.Context, httpClient *http.Client, queueURL, jobID, reas
 		log.Error("failed to nack job", "error", err)
 		return
 	}
-	_ = nackResp.Body.Close()
+	defer func() { _ = nackResp.Body.Close() }()
+
+	var result struct {
+		PermanentlyFailed bool `json:"permanently_failed"`
+	}
+	if err := json.NewDecoder(nackResp.Body).Decode(&result); err != nil {
+		log.Error("failed to decode nack response", "error", err)
+		return
+	}
+
+	if result.PermanentlyFailed {
+		log.Error("job permanently failed, notifying engine")
+		notifyEngineOfFailure(ctx, httpClient, engineURL, payload, reason, log)
+	}
+}
+
+// notifyEngineOfFailure tells the engine a step is never coming back,
+// via the failure counterpart to the success webhook pollOnce already
+// sends on a normal completion.
+func notifyEngineOfFailure(ctx context.Context, httpClient *http.Client, engineURL string, payload worker.StepPayload, reason string, log *slog.Logger) {
+	webhookPayload := worker.WebhookFailedPayload{
+		RunID:  payload.RunID,
+		StepID: payload.StepID,
+		Reason: reason,
+	}
+	webhookJSON, err := json.Marshal(webhookPayload)
+	if err != nil {
+		log.Error("failed to marshal failure webhook payload", "error", err)
+		return
+	}
+
+	webhookReq, err := http.NewRequestWithContext(ctx, http.MethodPost, engineURL+"/webhook/failed", bytes.NewReader(webhookJSON))
+	if err != nil {
+		log.Error("failed to build failure webhook request", "error", err)
+		return
+	}
+	webhookReq.Header.Set("Content-Type", "application/json")
+	webhookResp, err := httpClient.Do(webhookReq)
+	if err != nil {
+		log.Error("failed to notify engine of failure", "error", err)
+		return
+	}
+	_ = webhookResp.Body.Close()
 }
 
 // StepRunner executes a step's payload and returns its output. Each job

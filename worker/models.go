@@ -36,3 +36,12 @@ type WebhookPayload struct {
 	StepID string `json:"step_id"`
 	Output string `json:"output"`
 }
+
+// WebhookFailedPayload mirrors engine.WebhookFailedPayload. Sent to
+// /webhook/failed once the queue says a job has permanently failed
+// (see #47).
+type WebhookFailedPayload struct {
+	RunID  string `json:"run_id"`
+	StepID string `json:"step_id"`
+	Reason string `json:"reason"`
+}
