@@ -142,10 +142,11 @@ func runDemo(ctx context.Context, q *operations.Queue) {
 
 	// 9. Negative acknowledgment (Nack)
 	fmt.Println("9. Job Failure (Nack)...")
-	if err := q.Nack(ctx, dequeuedJob2.ID, "API timeout"); err != nil {
+	permanentlyFailed, err := q.Nack(ctx, dequeuedJob2.ID, "API timeout")
+	if err != nil {
 		log.Fatalf("Failed to nack: %v", err)
 	}
-	fmt.Printf("   Nacked: %s → failed (reason: API timeout)\n\n", dequeuedJob2.ID)
+	fmt.Printf("   Nacked: %s → failed (reason: API timeout, permanently_failed=%v)\n\n", dequeuedJob2.ID, permanentlyFailed)
 
 	// 10. Final stats
 	fmt.Println("10. Final Queue Stats:")

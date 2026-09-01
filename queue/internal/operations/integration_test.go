@@ -137,9 +137,12 @@ func TestNackJobIntegration(t *testing.T) {
 	q.Enqueue(ctx, job)
 	dequeuedJob, _ := q.Dequeue(ctx)
 
-	err = q.Nack(ctx, dequeuedJob.ID, "timeout error")
+	permanentlyFailed, err := q.Nack(ctx, dequeuedJob.ID, "timeout error")
 	if err != nil {
 		t.Fatalf("Nack failed: %v", err)
+	}
+	if !permanentlyFailed {
+		t.Error("expected permanentlyFailed=true with MaxRetries=0")
 	}
 	t.Log("✓ Job nacked (marked as failed)")
 
@@ -185,8 +188,12 @@ func TestNackRetriesJobIntegration(t *testing.T) {
 
 	// First Nack: one retry remains (MaxRetries=2), so this should
 	// re-enqueue rather than permanently fail.
-	if err := q.Nack(ctx, dequeuedJob.ID, "transient error"); err != nil {
+	permanentlyFailed, err := q.Nack(ctx, dequeuedJob.ID, "transient error")
+	if err != nil {
 		t.Fatalf("Nack (1st) failed: %v", err)
+	}
+	if permanentlyFailed {
+		t.Error("expected permanentlyFailed=false while retries remain")
 	}
 	status, _ := q.GetJobStatus(ctx, dequeuedJob.ID)
 	if status != "pending" {
@@ -209,8 +216,12 @@ func TestNackRetriesJobIntegration(t *testing.T) {
 
 	// Second Nack: retries now reach MaxRetries, so this should
 	// permanently fail.
-	if err := q.Nack(ctx, redequeued.ID, "transient error again"); err != nil {
+	permanentlyFailed, err = q.Nack(ctx, redequeued.ID, "transient error again")
+	if err != nil {
 		t.Fatalf("Nack (2nd) failed: %v", err)
+	}
+	if !permanentlyFailed {
+		t.Error("expected permanentlyFailed=true once retries are exhausted")
 	}
 	finalStatus, _ := q.GetJobStatus(ctx, redequeued.ID)
 	if finalStatus != "failed" {

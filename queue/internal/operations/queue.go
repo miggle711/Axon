@@ -76,27 +76,34 @@ func (q *Queue) Ack(ctx context.Context, jobID string) error {
 	return q.jobStore.UpdateJobStatus(ctx, jobID, "completed")
 }
 
-func (q *Queue) Nack(ctx context.Context, jobID string, reason string) error {
-	// Job failure handler. Every failure (a tool/LLM error, a timeout,
-	// a transient network error - Nack doesn't distinguish, see #37)
-	// gets a retry up to the job's MaxRetries before being permanently
-	// failed, instead of failing outright on the first attempt.
+// Nack handles a job failure. Every failure (a tool/LLM error, a
+// timeout, a transient network error - Nack doesn't distinguish, see
+// #37) gets a retry up to the job's MaxRetries before being
+// permanently failed, instead of failing outright on the first
+// attempt.
+//
+// The returned bool tells the caller whether this was the final
+// attempt - once retries are exhausted and the job is permanently
+// failed, the worker uses this to know it should let the engine know
+// the job is never coming back, instead of assuming another retry is
+// still on the way (see #47).
+func (q *Queue) Nack(ctx context.Context, jobID string, reason string) (bool, error) {
 	err := q.ops.RemoveFromRunning(ctx, jobID)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	job, err := q.jobStore.GetJob(ctx, jobID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if job == nil {
-		return nil // job no longer exists; nothing left to retry or fail
+		return false, nil // job no longer exists; nothing left to retry or fail
 	}
 
 	retries, err := q.jobStore.IncrementRetries(ctx, jobID)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if retries < job.MaxRetries {
@@ -105,16 +112,16 @@ func (q *Queue) Nack(ctx context.Context, jobID string, reason string) error {
 		// PopFromPending doesn't check it, so an immediate re-enqueue
 		// is the only scheduling this queue currently supports.
 		if err := q.ops.AddToPending(ctx, job, job.Priority); err != nil {
-			return err
+			return false, err
 		}
-		return q.jobStore.UpdateJobStatus(ctx, jobID, "pending")
+		return false, q.jobStore.UpdateJobStatus(ctx, jobID, "pending")
 	}
 
 	// Retries exhausted: fail permanently.
 	if err := q.ops.AddToFailed(ctx, job, reason); err != nil {
-		return err
+		return false, err
 	}
-	return q.jobStore.UpdateJobStatus(ctx, jobID, "failed")
+	return true, q.jobStore.UpdateJobStatus(ctx, jobID, "failed")
 }
 
 func (q *Queue) GetJobStatus(ctx context.Context, jobID string) (string, error) {
