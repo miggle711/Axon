@@ -109,3 +109,12 @@ type WebhookPayload struct {
 	StepID string `json:"step_id"`
 	Output string `json:"output"`
 }
+
+// WebhookFailedPayload is what the worker POSTs to /webhook/failed once
+// the queue tells it a job has permanently failed (retries exhausted,
+// see #37/#47) rather than another retry being on the way.
+type WebhookFailedPayload struct {
+	RunID  string `json:"run_id"`
+	StepID string `json:"step_id"`
+	Reason string `json:"reason"`
+}

@@ -29,6 +29,27 @@ func (s *Server) webhookCompleteHandler(c *gin.Context) {
 	c.JSON(200, SuccessResponse{Message: "Step marked as complete"})
 }
 
+func (s *Server) webhookFailedHandler(c *gin.Context) {
+	var payload engine.WebhookFailedPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(400, ErrorResponse{Error: "Invalid request body", Code: 400})
+		return
+	}
+
+	if payload.RunID == "" || payload.StepID == "" || payload.Reason == "" {
+		c.JSON(400, ErrorResponse{Error: "Missing required fields", Code: 400})
+		return
+	}
+
+	err := s.orchestrator.OnStepFailed(c.Request.Context(), payload)
+	if err != nil {
+		c.JSON(500, ErrorResponse{Error: "Failed to mark step as failed", Code: 500})
+		return
+	}
+
+	c.JSON(200, SuccessResponse{Message: "Step marked as failed"})
+}
+
 func (s *Server) getRunHandler(c *gin.Context) {
 	runID := c.Param("id")
 	if runID == "" {

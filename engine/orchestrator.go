@@ -354,6 +354,71 @@ func previewText(s string) string {
 	return s[:maxLen] + "..."
 }
 
+// OnStepFailed marks a step as permanently failed (the worker calls
+// this once the queue tells it retries are exhausted, see #37/#47) and
+// fails the run outright: Status becomes "failed", a new terminal
+// state distinct from "in_progress" - without this, a run with a dead
+// step looked identical to one still working, since nothing ever told
+// the engine the step was never coming back.
+//
+// If the failed step is a supervisor's own decision, or the option a
+// supervisor is currently waiting on, that supervisor's loop is
+// abandoned (its ActiveSupervisorChoice entry is cleared) rather than
+// left dangling forever. No attempt is made to give the loop another
+// chance - a supervisor-related failure just fails the run like any
+// other step failing.
+//
+// If this run was spawned by an agent_call step, the failure
+// propagates to the parent run's agent_call step too, the same way
+// finalizeStepCompletion already propagates a successful completion -
+// otherwise a failed child would strand its parent run forever, one
+// level removed from the exact bug this method exists to fix.
+func (orchestrator *Orchestrator) OnStepFailed(ctx context.Context, payload WebhookFailedPayload) error {
+	log := orchestrator.logger.With("run_id", payload.RunID, "step_id", payload.StepID)
+	log.Error("step permanently failed", "reason", payload.Reason)
+
+	lock := orchestrator.lockFor(payload.RunID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	run, err := orchestrator.store.GetRun(ctx, payload.RunID)
+	if err != nil {
+		log.Error("failed to retrieve run", "error", err)
+		return fmt.Errorf("failed to retrieve run: %v", err)
+	}
+
+	// If the failed step is a supervisor's own decision, or the option
+	// a supervisor is currently waiting on, that supervisor's loop
+	// can't ever continue - clear it rather than leaving a dangling
+	// entry pointing at a step that will never complete.
+	delete(run.ActiveSupervisorChoice, payload.StepID)
+	for supervisorID, chosen := range run.ActiveSupervisorChoice {
+		if chosen == payload.StepID {
+			delete(run.ActiveSupervisorChoice, supervisorID)
+		}
+	}
+
+	run.FailedSteps = append(run.FailedSteps, payload.StepID)
+	run.Status = "failed"
+	run.UpdatedAt = time.Now()
+
+	if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+		log.Error("failed to save updated run", "error", err)
+		return fmt.Errorf("failed to save updated run: %v", err)
+	}
+
+	if run.ParentRunID != "" {
+		log.Info("propagating failure to parent", "parent_run_id", run.ParentRunID, "parent_step_id", run.ParentStepID)
+		return orchestrator.OnStepFailed(ctx, WebhookFailedPayload{
+			RunID:  run.ParentRunID,
+			StepID: run.ParentStepID,
+			Reason: fmt.Sprintf("child run %s failed: %s", run.ID, payload.Reason),
+		})
+	}
+
+	return nil
+}
+
 // finalizeStepCompletion runs the shared tail of a step's completion:
 // resolving any newly-unblocked steps (or supervisor decisions,
 // conditionals, agent_call spawns), recomputing run status, saving, and
