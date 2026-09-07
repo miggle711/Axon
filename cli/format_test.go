@@ -54,6 +54,26 @@ func TestFormatRunStatus_SkippedStep(t *testing.T) {
 	}
 }
 
+func TestFormatRunStatus_FailedStep(t *testing.T) {
+	run := &engine.Run{
+		ID:        "run-5",
+		AgentName: "failing_agent",
+		Status:    "failed",
+		Steps: []engine.StepDefinition{
+			{ID: "bad_step", Type: engine.StepTypeToolCall},
+		},
+		FailedSteps: []string{"bad_step"},
+	}
+
+	output := FormatRunStatus(run)
+	if !strings.Contains(output, "Status: failed") {
+		t.Errorf("expected overall Status to show 'failed', got:\n%s", output)
+	}
+	if !strings.Contains(output, "bad_step (failed)") {
+		t.Errorf("expected bad_step to be marked failed, got:\n%s", output)
+	}
+}
+
 func TestFormatRunStatus_InProgressNoResult(t *testing.T) {
 	run := &engine.Run{
 		ID:        "run-3",

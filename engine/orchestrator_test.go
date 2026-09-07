@@ -596,6 +596,192 @@ func TestSupervisor_ErrorCases(t *testing.T) {
 	})
 }
 
+// TestOnStepFailed_MarksRunFailed covers #47: a permanently failed
+// step must fail the run outright (a new terminal Status, not left at
+// "in_progress" forever) and record the step in FailedSteps.
+func TestOnStepFailed_MarksRunFailed(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+
+	agent := AgentDefinition{
+		Name: "test_agent",
+		Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}},
+		},
+	}
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	err = orchestrator.OnStepFailed(ctx, WebhookFailedPayload{RunID: run.ID, StepID: "step_1", Reason: "rate limited"})
+	if err != nil {
+		t.Fatalf("OnStepFailed failed: %v", err)
+	}
+
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.Status != "failed" {
+		t.Errorf("expected Status 'failed', got %q", run.Status)
+	}
+	found := false
+	for _, id := range run.FailedSteps {
+		if id == "step_1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected step_1 in FailedSteps, got %v", run.FailedSteps)
+	}
+}
+
+// TestOnStepFailed_ClearsActiveSupervisorChoice covers #47's
+// supervisor-specific case: a permanently failed supervisor-owned step
+// (its own decision, or the option it's waiting on) must not leave
+// ActiveSupervisorChoice dangling forever.
+func TestOnStepFailed_ClearsActiveSupervisorChoice(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	t.Run("supervisor's own decision fails", func(t *testing.T) {
+		store := newFakeRunStore()
+		orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+		agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
+
+		ctx := context.Background()
+		run, err := orchestrator.CreateRun(ctx, agent, "start")
+		if err != nil {
+			t.Fatalf("CreateRun failed: %v", err)
+		}
+		// Get the loop started so there's an ActiveSupervisorChoice entry to clear.
+		if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "option_a"}); err != nil {
+			t.Fatalf("OnStepCompleted(supervisor_step) failed: %v", err)
+		}
+
+		// The supervisor's own next decision job fails permanently -
+		// e.g. option_a completed and re-triggered the supervisor, and
+		// this new decision job never comes back.
+		if err := orchestrator.OnStepFailed(ctx, WebhookFailedPayload{RunID: run.ID, StepID: "supervisor_step", Reason: "rate limited"}); err != nil {
+			t.Fatalf("OnStepFailed failed: %v", err)
+		}
+
+		run, err = orchestrator.GetRun(ctx, run.ID)
+		if err != nil {
+			t.Fatalf("GetRun failed: %v", err)
+		}
+		if run.Status != "failed" {
+			t.Errorf("expected Status 'failed', got %q", run.Status)
+		}
+		if _, active := run.ActiveSupervisorChoice["supervisor_step"]; active {
+			t.Errorf("expected ActiveSupervisorChoice to be cleared, got %v", run.ActiveSupervisorChoice)
+		}
+	})
+
+	t.Run("supervisor's chosen option fails", func(t *testing.T) {
+		store := newFakeRunStore()
+		orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+		agent := AgentDefinition{Name: "supervisor_test_agent", Steps: supervisorTestAgentSteps()}
+
+		ctx := context.Background()
+		run, err := orchestrator.CreateRun(ctx, agent, "start")
+		if err != nil {
+			t.Fatalf("CreateRun failed: %v", err)
+		}
+		if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: "option_a"}); err != nil {
+			t.Fatalf("OnStepCompleted(supervisor_step) failed: %v", err)
+		}
+
+		// option_a, the step the supervisor is currently waiting on, fails permanently.
+		if err := orchestrator.OnStepFailed(ctx, WebhookFailedPayload{RunID: run.ID, StepID: "option_a", Reason: "rate limited"}); err != nil {
+			t.Fatalf("OnStepFailed failed: %v", err)
+		}
+
+		run, err = orchestrator.GetRun(ctx, run.ID)
+		if err != nil {
+			t.Fatalf("GetRun failed: %v", err)
+		}
+		if run.Status != "failed" {
+			t.Errorf("expected Status 'failed', got %q", run.Status)
+		}
+		if _, active := run.ActiveSupervisorChoice["supervisor_step"]; active {
+			t.Errorf("expected ActiveSupervisorChoice to be cleared, got %v", run.ActiveSupervisorChoice)
+		}
+	})
+}
+
+// TestOnStepFailed_PropagatesToParent covers #47: a child run spawned
+// via agent_call failing must fail the parent's agent_call step too,
+// mirroring how a successful completion already propagates.
+func TestOnStepFailed_PropagatesToParent(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+
+	childAgent := AgentDefinition{
+		Name:       "child_agent",
+		OutputStep: "child_step",
+		Steps: []StepDefinition{
+			{ID: "child_step", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}},
+		},
+	}
+	registry := MapAgentRegistry{"child_agent": childAgent}
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry, discardLogger)
+
+	parentAgent := AgentDefinition{
+		Name: "parent_agent",
+		Steps: []StepDefinition{
+			{ID: "call_child", Type: StepTypeAgentCall, Agent: "child_agent", DependsOn: []string{}},
+		},
+	}
+
+	ctx := context.Background()
+	parentRun, err := orchestrator.CreateRun(ctx, parentAgent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	enqueuedRef := parentRun.EnqueuedSteps["call_child"]
+	childRunID := enqueuedRef[len("run:"):]
+
+	// The child run's only step fails permanently.
+	if err := orchestrator.OnStepFailed(ctx, WebhookFailedPayload{RunID: childRunID, StepID: "child_step", Reason: "rate limited"}); err != nil {
+		t.Fatalf("OnStepFailed(child) failed: %v", err)
+	}
+
+	childRun, err := orchestrator.GetRun(ctx, childRunID)
+	if err != nil {
+		t.Fatalf("GetRun(child) failed: %v", err)
+	}
+	if childRun.Status != "failed" {
+		t.Errorf("expected child run Status 'failed', got %q", childRun.Status)
+	}
+
+	parentRun, err = orchestrator.GetRun(ctx, parentRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(parent) failed: %v", err)
+	}
+	if parentRun.Status != "failed" {
+		t.Errorf("expected parent run Status 'failed', got %q", parentRun.Status)
+	}
+	found := false
+	for _, id := range parentRun.FailedSteps {
+		if id == "call_child" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected call_child in parent's FailedSteps, got %v", parentRun.FailedSteps)
+	}
+}
+
 func TestEvaluateCondition(t *testing.T) {
 	run := &Run{
 		UserInput:   "hello",

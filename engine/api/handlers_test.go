@@ -142,3 +142,45 @@ func TestCreateRunHandler_UnknownAgentName(t *testing.T) {
 		t.Fatalf("expected 500 for an unknown agent name, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestWebhookFailedHandler_MarksRunFailed(t *testing.T) {
+	def := engine.AgentDefinition{
+		Name:  "test_agent",
+		Steps: []engine.StepDefinition{{ID: "step_1", Type: engine.StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}}},
+	}
+	server := newTestServer(t, engine.MapAgentRegistry{"test_agent": def})
+
+	createBody, _ := json.Marshal(map[string]string{"agent_name": "test_agent", "input": "hello"})
+	createResp := doRequest(t, server, http.MethodPost, "/runs", createBody)
+	var run engine.Run
+	if err := json.Unmarshal(createResp.Body.Bytes(), &run); err != nil {
+		t.Fatalf("failed to decode create response: %v", err)
+	}
+
+	failBody, _ := json.Marshal(map[string]string{"run_id": run.ID, "step_id": "step_1", "reason": "rate limited"})
+	w := doRequest(t, server, http.MethodPost, "/webhook/failed", failBody)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	getResp := doRequest(t, server, http.MethodGet, "/runs/"+run.ID, nil)
+	var updatedRun engine.Run
+	if err := json.Unmarshal(getResp.Body.Bytes(), &updatedRun); err != nil {
+		t.Fatalf("failed to decode get response: %v", err)
+	}
+	if updatedRun.Status != "failed" {
+		t.Errorf("expected Status 'failed', got %q", updatedRun.Status)
+	}
+}
+
+func TestWebhookFailedHandler_RejectsMissingFields(t *testing.T) {
+	server := newTestServer(t, engine.MapAgentRegistry{})
+
+	body, _ := json.Marshal(map[string]string{"run_id": "some-run", "step_id": "some-step"}) // missing reason
+	w := doRequest(t, server, http.MethodPost, "/webhook/failed", body)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when reason is missing, got %d: %s", w.Code, w.Body.String())
+	}
+}

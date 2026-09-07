@@ -247,9 +247,12 @@ func TestNackMarksJobFailed_NoRetriesConfigured(t *testing.T) {
 	_ = mockStore.StoreJob(ctx, job)
 	_ = mockOps.AddToRunning(ctx, job)
 
-	err := q.Nack(ctx, jobID, "timeout")
+	permanentlyFailed, err := q.Nack(ctx, jobID, "timeout")
 	if err != nil {
 		t.Fatalf("Nack failed: %v", err)
+	}
+	if !permanentlyFailed {
+		t.Error("expected permanentlyFailed=true with MaxRetries=0")
 	}
 
 	// Verify job is no longer in running
@@ -288,9 +291,12 @@ func TestNackRetriesJobWhenRetriesRemain(t *testing.T) {
 	_ = mockStore.StoreJob(ctx, job)
 	_ = mockOps.AddToRunning(ctx, job)
 
-	err := q.Nack(ctx, jobID, "rate limited")
+	permanentlyFailed, err := q.Nack(ctx, jobID, "rate limited")
 	if err != nil {
 		t.Fatalf("Nack failed: %v", err)
+	}
+	if permanentlyFailed {
+		t.Error("expected permanentlyFailed=false while retries remain")
 	}
 
 	// Should NOT be in the failed set - retries remain
@@ -335,12 +341,17 @@ func TestNackFailsJobOnceRetriesExhausted(t *testing.T) {
 	// count finally reaches MaxRetries and the job fails permanently.
 	for i := 0; i < job.MaxRetries; i++ {
 		_ = mockOps.AddToRunning(ctx, job)
-		if err := q.Nack(ctx, jobID, "still failing"); err != nil {
+		isLastAttempt := i == job.MaxRetries-1
+
+		permanentlyFailed, err := q.Nack(ctx, jobID, "still failing")
+		if err != nil {
 			t.Fatalf("Nack #%d failed: %v", i+1, err)
+		}
+		if permanentlyFailed != isLastAttempt {
+			t.Errorf("Nack #%d: expected permanentlyFailed=%v, got %v", i+1, isLastAttempt, permanentlyFailed)
 		}
 
 		updatedJob, _ := mockStore.GetJob(ctx, jobID)
-		isLastAttempt := i == job.MaxRetries-1
 		_, failed := mockOps.failed[jobID]
 		if failed != isLastAttempt {
 			t.Errorf("Nack #%d: expected failed=%v, got %v (Retries=%d)", i+1, isLastAttempt, failed, updatedJob.Retries)

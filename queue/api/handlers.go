@@ -128,11 +128,14 @@ func (s *Server) failHandler(c *gin.Context) {
 		return
 	}
 
-	err := s.queue.Nack(c.Request.Context(), jobID, req.Reason)
+	permanentlyFailed, err := s.queue.Nack(c.Request.Context(), jobID, req.Reason)
 	if err != nil {
 		c.JSON(500, ErrorResponse{Error: "Failed to mark job as failed", Code: 500})
 		return
 	}
 
-	c.JSON(200, gin.H{"message": "Job marked as failed successfully"})
+	c.JSON(200, gin.H{
+		"message":            "Job marked as failed successfully",
+		"permanently_failed": permanentlyFailed,
+	})
 }

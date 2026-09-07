@@ -22,11 +22,14 @@ func FormatRunStatus(run *engine.Run) string {
 
 	completed := toSet(run.CompletedSteps)
 	skipped := toSet(run.SkippedSteps)
+	failed := toSet(run.FailedSteps)
 
 	b.WriteString("Steps:\n")
 	for _, step := range run.Steps {
 		state := "pending"
 		switch {
+		case failed[step.ID]:
+			state = "failed"
 		case skipped[step.ID]:
 			state = "skipped"
 		case completed[step.ID]:
@@ -61,6 +64,8 @@ func stateGlyph(state string) string {
 	switch state {
 	case "completed":
 		return "x"
+	case "failed":
+		return "!"
 	case "skipped":
 		return "-"
 	case "running":
