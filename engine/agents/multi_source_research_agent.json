@@ -1,0 +1,27 @@
+{
+  "name": "multi_source_research_agent",
+  "description": "Runs two independent Tavily searches on the same question from different angles (general background, and recent developments), then synthesizes a single answer from both. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker. Exercises a genuine fan-in dependency (one step depending on two others) that no other agent in this repo has needed yet.",
+  "output_step": "answer",
+  "steps": [
+    {
+      "id": "background_search",
+      "type": "tool_call",
+      "tool": "tavily_search",
+      "input_template": "{{user_input}}",
+      "depends_on": []
+    },
+    {
+      "id": "recent_search",
+      "type": "tool_call",
+      "tool": "tavily_search",
+      "input_template": "{{user_input}} latest news recent developments",
+      "depends_on": []
+    },
+    {
+      "id": "answer",
+      "type": "llm_call",
+      "prompt_template": "Answer the question below by combining both sets of search results. Note where the general background and the recent developments agree, and call out anything in the recent results that updates or adds to the background. Be concise.\n\nQuestion: {{user_input}}\n\nGeneral background:\n{{background_search.output}}\n\nRecent developments:\n{{recent_search.output}}",
+      "depends_on": ["background_search", "recent_search"]
+    }
+  ]
+}
