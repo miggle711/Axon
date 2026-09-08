@@ -18,7 +18,8 @@ var stepIterationPlaceholder = regexp.MustCompile(`\{\{([^}]+)\.iteration\}\}`)
 // validateAgentDefinition checks that def's steps form a well-formed
 // DAG before any run is created from it: no duplicate step IDs, every
 // step-ID reference (DependsOn, OnTrue, OnFalse, Options) points at a
-// real step, no dependency cycles, and every {{step_id.output}} or
+// real step, a step's FirstIterationStep (if set) is one of its own
+// Options, no dependency cycles, and every {{step_id.output}} or
 // {{step_id.iteration}} template placeholder references a real step.
 // Catches mistakes that would otherwise surface as a silent hang (a cycle: no step ever
 // becomes enqueable) or silently-unresolved {{...}} text in a step's
@@ -59,6 +60,19 @@ func validateAgentDefinition(def AgentDefinition) error {
 		for _, opt := range step.Options {
 			if err := referencesStep("options", step.ID, opt); err != nil {
 				return err
+			}
+		}
+		if step.FirstIterationStep != "" {
+			isOption := false
+			for _, opt := range step.Options {
+				if opt == step.FirstIterationStep {
+					isOption = true
+					break
+				}
+			}
+			if !isOption {
+				return fmt.Errorf("agent %q: step %q's first_iteration_step %q must be one of its options %v",
+					def.Name, step.ID, step.FirstIterationStep, step.Options)
 			}
 		}
 	}

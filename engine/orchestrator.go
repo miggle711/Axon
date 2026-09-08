@@ -232,6 +232,15 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 				continue
 			}
 
+			if step.Type == StepTypeSupervisor {
+				if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
+					log.Error("failed to enqueue supervisor decision", "step_id", step.ID, "error", err)
+					return nil, err
+				}
+				changed = true
+				continue
+			}
+
 			// Enqueue the step and update the run's EnqueuedSteps map
 			jobID, err := orchestrator.queueClient.Enqueue(
 				ctx,
@@ -586,8 +595,37 @@ func findStep(steps []StepDefinition, stepID string) (StepDefinition, bool) {
 // comes back through the normal webhook path, where OnStepCompleted
 // recognizes it as a supervisor step and routes to
 // handleSupervisorDecision instead of normal DAG progression.
+//
+// If supervisorStep.FirstIterationStep is set and no decision has been
+// made for it yet (SupervisorIterations has no entry), the LLM call is
+// skipped entirely for this one iteration: FirstIterationStep is
+// enqueued directly, the same way an LLM-chosen option would be (see
+// #56) - no model round trip needed to arrive at a fixed first move.
 func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context, run *Run, supervisorStep StepDefinition) error {
 	log := orchestrator.logger.With("run_id", run.ID, "step_id", supervisorStep.ID)
+
+	if supervisorStep.FirstIterationStep != "" {
+		if _, decided := run.SupervisorIterations[supervisorStep.ID]; !decided {
+			optionStep, ok := findStep(run.Steps, supervisorStep.FirstIterationStep)
+			if !ok {
+				log.Error("first_iteration_step is not a step in this run", "first_iteration_step", supervisorStep.FirstIterationStep)
+				return fmt.Errorf("supervisor step %s: first_iteration_step %q is not a step in this run", supervisorStep.ID, supervisorStep.FirstIterationStep)
+			}
+			run.SupervisorIterations[supervisorStep.ID]++
+			run.ActiveSupervisorChoice[supervisorStep.ID] = supervisorStep.FirstIterationStep
+			// Mark the supervisor step itself as "enqueued" too (no LLM
+			// job actually backs this entry), so canEnqueueStep doesn't
+			// see it as still pending and re-run this branch on the next
+			// pass through the resolve loop.
+			run.EnqueuedSteps[supervisorStep.ID] = "auto:" + supervisorStep.FirstIterationStep
+			if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+				log.Error("failed to save updated run", "error", err)
+				return fmt.Errorf("failed to save updated run: %v", err)
+			}
+			log.Info("first iteration step auto-picked, skipping LLM decision", "first_iteration_step", supervisorStep.FirstIterationStep)
+			return orchestrator.enqueueOptionStep(ctx, run, optionStep)
+		}
+	}
 
 	jobID, err := orchestrator.queueClient.Enqueue(
 		ctx,

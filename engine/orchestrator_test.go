@@ -510,6 +510,75 @@ func TestSupervisor_LoopsAndStops(t *testing.T) {
 	}
 }
 
+// TestSupervisor_FirstIterationStep covers #56's structural fix: a
+// supervisor with FirstIterationStep set skips the LLM decision call
+// entirely on its first iteration, auto-picking that option instead,
+// then goes back to normal LLM-driven decisions from the second
+// iteration on.
+func TestSupervisor_FirstIterationStep(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+
+	steps := supervisorTestAgentSteps()
+	for i := range steps {
+		if steps[i].ID == "supervisor_step" {
+			steps[i].FirstIterationStep = "option_a"
+		}
+	}
+	agent := AgentDefinition{Name: "supervisor_first_iteration_test_agent", Steps: steps}
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	// option_a should be enqueued directly, no LLM decision job created
+	// for the supervisor step itself on this first iteration - its
+	// EnqueuedSteps entry is a marker ("auto:option_a"), not a real job ID.
+	if got := run.EnqueuedSteps["supervisor_step"]; got != "auto:option_a" {
+		t.Fatalf("expected supervisor_step's EnqueuedSteps entry to be the auto-pick marker \"auto:option_a\" (no real LLM job), got %q; EnqueuedSteps=%v", got, run.EnqueuedSteps)
+	}
+	if _, enqueued := run.EnqueuedSteps["option_a"]; !enqueued {
+		t.Fatalf("expected option_a to be auto-enqueued as the first_iteration_step, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+	if run.ActiveSupervisorChoice["supervisor_step"] != "option_a" {
+		t.Fatalf("expected active choice option_a, got %q", run.ActiveSupervisorChoice["supervisor_step"])
+	}
+	if run.SupervisorIterations["supervisor_step"] != 1 {
+		t.Fatalf("expected 1 iteration recorded after the auto-pick, got %d", run.SupervisorIterations["supervisor_step"])
+	}
+
+	// option_a completes, which should now re-invoke the supervisor as
+	// a normal LLM decision call, since the first iteration is done.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "option_a", Output: "ran option a"}); err != nil {
+		t.Fatalf("option_a completion failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if _, enqueued := run.EnqueuedSteps["supervisor_step"]; !enqueued {
+		t.Fatalf("expected supervisor_step to be enqueued as a normal LLM decision on iteration 2, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+
+	// Iteration 2: supervisor says done, using option_a's output since
+	// no second option ran.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "supervisor_step", Output: SupervisorDoneSignal}); err != nil {
+		t.Fatalf("supervisor decision (done) failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.StepResults["supervisor_step"] != "ran option a" {
+		t.Errorf("expected supervisor_step result 'ran option a', got %q", run.StepResults["supervisor_step"])
+	}
+}
+
 // TestSupervisor_IterationCap verifies that hitting
 // MaxSupervisorIterations force-stops the loop (ignoring a further
 // Options pick) using the most recent option's output, rather than

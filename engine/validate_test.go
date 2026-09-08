@@ -82,6 +82,47 @@ func TestValidateAgentDefinition_DanglingOption(t *testing.T) {
 	}
 }
 
+func TestValidateAgentDefinition_FirstIterationStep(t *testing.T) {
+	t.Run("must be one of options", func(t *testing.T) {
+		def := AgentDefinition{
+			Name: "a",
+			Steps: []StepDefinition{
+				{ID: "supervisor_step", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{"option_a"}, FirstIterationStep: "option_b", DependsOn: []string{}},
+				{ID: "option_a", Type: StepTypeToolCall, DependsOn: []string{"supervisor_step"}},
+			},
+		}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for a first_iteration_step not in options, got none")
+		}
+	})
+
+	t.Run("a value matching one of options is valid", func(t *testing.T) {
+		def := AgentDefinition{
+			Name: "a",
+			Steps: []StepDefinition{
+				{ID: "supervisor_step", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{"option_a"}, FirstIterationStep: "option_a", DependsOn: []string{}},
+				{ID: "option_a", Type: StepTypeToolCall, DependsOn: []string{"supervisor_step"}},
+			},
+		}
+		if err := validateAgentDefinition(def); err != nil {
+			t.Errorf("expected first_iteration_step matching an option to be valid, got: %v", err)
+		}
+	})
+
+	t.Run("empty first_iteration_step is valid", func(t *testing.T) {
+		def := AgentDefinition{
+			Name: "a",
+			Steps: []StepDefinition{
+				{ID: "supervisor_step", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{"option_a"}, DependsOn: []string{}},
+				{ID: "option_a", Type: StepTypeToolCall, DependsOn: []string{"supervisor_step"}},
+			},
+		}
+		if err := validateAgentDefinition(def); err != nil {
+			t.Errorf("expected empty first_iteration_step to be valid (optional field), got: %v", err)
+		}
+	})
+}
+
 func TestValidateAgentDefinition_Cycle(t *testing.T) {
 	t.Run("direct cycle", func(t *testing.T) {
 		def := AgentDefinition{Name: "a", Steps: []StepDefinition{

@@ -44,6 +44,14 @@ type StepDefinition struct {
 	// Supervisor routing
 	Options []string `json:"options,omitempty"` // step IDs the supervisor can choose
 
+	// FirstIterationStep, if set, names one of Options to run
+	// automatically on this supervisor's first iteration, skipping the
+	// LLM decision call for that one iteration. Lets a supervisor whose
+	// first move is always the same option skip asking the model to
+	// pick it (see #56): no LLM round trip to get wrong, and the
+	// prompt_template no longer has to instruct the model on what to
+	// say the first time it's asked.
+	FirstIterationStep string `json:"first_iteration_step,omitempty"`
 }
 
 // the agent blueprint
