@@ -1,0 +1,27 @@
+{
+  "name": "iterative_writer_agent",
+  "description": "Demonstrates first_iteration_step (#56): editor has no depends_on and no prior draft to judge, so its first move is structurally forced to be draft rather than an LLM decision with nothing real to decide. From the second iteration on, editor makes a real LLM judgment on the latest draft, revising up to the iteration cap or stopping once satisfied. Requires GROQ_API_KEY to be set on the worker.",
+  "output_step": "answer",
+  "steps": [
+    {
+      "id": "editor",
+      "type": "supervisor",
+      "prompt_template": "You are editing a short paragraph answering a question, judging the latest draft below.\n\nQuestion: {{user_input}}\n\nLatest draft:\n{{draft.output}}\n\nIf the draft answers the question clearly and concisely, respond with exactly: done\nOtherwise, respond with exactly: draft\n\nRespond with only one of those two words, nothing else.",
+      "options": ["draft"],
+      "first_iteration_step": "draft",
+      "depends_on": []
+    },
+    {
+      "id": "draft",
+      "type": "llm_call",
+      "prompt_template": "Write a short, clear paragraph answering the question below. If a previous draft is shown, improve on it rather than starting over.\n\nQuestion: {{user_input}}\n\nPrevious draft (if any):\n{{draft.output}}",
+      "depends_on": ["editor"]
+    },
+    {
+      "id": "answer",
+      "type": "llm_call",
+      "prompt_template": "Return the text below exactly as given, with no changes and no extra commentary.\n\n{{editor.output}}",
+      "depends_on": ["editor"]
+    }
+  ]
+}
