@@ -86,6 +86,46 @@ func canEnqueueStep(step StepDefinition, run *Run) bool {
 	return true // All dependencies are satisfied, can enqueue
 }
 
+// runIsComplete reports whether every step in run.Steps has reached a
+// terminal state: completed, skipped, or (see #57) a supervisor's own
+// option step, which by design never gets its own CompletedSteps entry
+// - only the supervisor step itself does, once its loop actually stops
+// (see canEnqueueStep's comment above). Counting option steps as their
+// own separate thing that must also individually complete made the
+// old len(CompletedSteps)+len(SkippedSteps)==len(Steps) check
+// permanently unsatisfiable for any agent with a supervisor: the
+// option step could never be added to CompletedSteps no matter how the
+// run actually turned out, so the run stayed stuck at "in_progress"
+// forever even once every step's real result was already in.
+func runIsComplete(run *Run) bool {
+	supervisorOptions := make(map[string]bool)
+	for _, step := range run.Steps {
+		if step.Type == StepTypeSupervisor {
+			for _, opt := range step.Options {
+				supervisorOptions[opt] = true
+			}
+		}
+	}
+
+	done := make(map[string]bool, len(run.CompletedSteps)+len(run.SkippedSteps))
+	for _, id := range run.CompletedSteps {
+		done[id] = true
+	}
+	for _, id := range run.SkippedSteps {
+		done[id] = true
+	}
+
+	for _, step := range run.Steps {
+		if supervisorOptions[step.ID] {
+			continue
+		}
+		if !done[step.ID] {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveTemplate substitutes {{user_input}}, {{step_id.output}}, and
 // {{step_id.iteration}} placeholders in template with values from run.
 //
@@ -536,10 +576,7 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 		}
 	}
 
-	// Update the run's status based on the completion of steps.
-	// SkippedSteps count toward completion since a skipped step will
-	// never itself complete.
-	if len(run.CompletedSteps)+len(run.SkippedSteps) == len(run.Steps) {
+	if runIsComplete(run) {
 		run.Status = "completed"
 	} else {
 		run.Status = "in_progress"

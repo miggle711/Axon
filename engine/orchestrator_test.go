@@ -508,6 +508,23 @@ func TestSupervisor_LoopsAndStops(t *testing.T) {
 	if _, enqueued := run.EnqueuedSteps["after_supervisor"]; !enqueued {
 		t.Errorf("expected after_supervisor to be enqueued once the supervisor stopped, got EnqueuedSteps=%v", run.EnqueuedSteps)
 	}
+
+	// Completing the one step left (after_supervisor) should bring the
+	// run to Status "completed" - regression coverage for #57: the old
+	// completion formula could never be satisfied for any agent with a
+	// supervisor loop, since option_a/option_b (the supervisor's own
+	// Options) never get their own CompletedSteps entry by design.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "after_supervisor", Output: "done"}); err != nil {
+		t.Fatalf("after_supervisor completion failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if run.Status != "completed" {
+		t.Errorf("expected run Status 'completed' once every non-option step is done, got %q (completed=%v skipped=%v steps=%d)",
+			run.Status, run.CompletedSteps, run.SkippedSteps, len(run.Steps))
+	}
 }
 
 // TestSupervisor_FirstIterationStep covers #56's structural fix: a
@@ -1015,6 +1032,51 @@ func TestOnStepCompleted_ConcurrentCallsDoNotLoseUpdates(t *testing.T) {
 	if final.Status != "completed" {
 		t.Errorf("expected run status 'completed', got %q (completed=%v)", final.Status, final.CompletedSteps)
 	}
+}
+
+// TestRunIsComplete covers #57: the run-completion check must count a
+// supervisor's Options steps as accounted for once the supervisor
+// itself has completed, since an Options step never gets its own
+// CompletedSteps entry (see canEnqueueStep's comment) no matter how
+// many times it actually ran.
+func TestRunIsComplete(t *testing.T) {
+	steps := supervisorTestAgentSteps() // supervisor_step, option_a, option_b, after_supervisor
+
+	t.Run("false when a non-option step hasn't completed", func(t *testing.T) {
+		run := &Run{Steps: steps, CompletedSteps: []string{"supervisor_step"}}
+		if runIsComplete(run) {
+			t.Error("expected incomplete: after_supervisor hasn't run yet")
+		}
+	})
+
+	t.Run("true once every step except the supervisor's own options is done, even though the options themselves never appear in CompletedSteps", func(t *testing.T) {
+		run := &Run{Steps: steps, CompletedSteps: []string{"supervisor_step", "after_supervisor"}}
+		if !runIsComplete(run) {
+			t.Error("expected complete: option_a/option_b are the supervisor's own options and don't need their own CompletedSteps entry")
+		}
+	})
+
+	t.Run("skipped steps count toward completion same as completed ones", func(t *testing.T) {
+		def := AgentDefinition{Steps: conditionalTestAgentSteps()} // step_1, check, on_true_step, on_false_step
+		run := &Run{
+			Steps:          def.Steps,
+			CompletedSteps: []string{"step_1", "check", "on_true_step"},
+			SkippedSteps:   []string{"on_false_step"},
+		}
+		if !runIsComplete(run) {
+			t.Error("expected complete: on_false_step is skipped, not completed, but should still count")
+		}
+	})
+
+	t.Run("an agent with no supervisor steps behaves exactly as before", func(t *testing.T) {
+		run := &Run{
+			Steps:          []StepDefinition{{ID: "step_1", Type: StepTypeToolCall}},
+			CompletedSteps: []string{"step_1"},
+		}
+		if !runIsComplete(run) {
+			t.Error("expected complete: the one step is done and there's no supervisor involved")
+		}
+	})
 }
 
 func TestResolveStepInput(t *testing.T) {
