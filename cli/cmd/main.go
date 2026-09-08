@@ -5,11 +5,26 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	cli "axon-cli"
 )
 
 const defaultEngineURL = "http://localhost:8000"
+
+// watchPollInterval is how often --watch re-fetches a run's status.
+// Matches how fast real steps have resolved in testing (sub-second to
+// a few seconds each) - frequent enough to feel live, not so frequent
+// it hammers the engine while a run works through several steps.
+const watchPollInterval = 2 * time.Second
+
+// terminalRunStatuses are the Run.Status values that will never
+// change again, per engine.finalizeStepCompletion/OnStepFailed - a
+// run reaching one of these is when --watch stops polling.
+var terminalRunStatuses = map[string]bool{
+	"completed": true,
+	"failed":    true,
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -74,8 +89,9 @@ func runCommand(ctx context.Context, args []string) {
 func statusCommand(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	fs.String("engine", "", "Engine API base URL (default: $AXON_ENGINE_URL, or "+defaultEngineURL+")")
+	watch := fs.Bool("watch", false, "Keep polling and reprinting status until the run completes or fails")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: axon status [--engine URL] <run_id>")
+		fmt.Fprintln(os.Stderr, "usage: axon status [--engine URL] [--watch] <run_id>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -88,20 +104,47 @@ func statusCommand(ctx context.Context, args []string) {
 	runID := fs.Arg(0)
 
 	client := cli.NewClient(engineURL(fs))
-	run, err := client.GetRun(ctx, runID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+
+	if !*watch {
+		run, err := client.GetRun(ctx, runID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(cli.FormatRunStatus(run))
+		return
 	}
-	fmt.Print(cli.FormatRunStatus(run))
+
+	for {
+		run, err := client.GetRun(ctx, runID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		clearScreen()
+		fmt.Print(cli.FormatRunStatus(run))
+
+		if terminalRunStatuses[run.Status] {
+			return
+		}
+		time.Sleep(watchPollInterval)
+	}
+}
+
+// clearScreen wipes the terminal between --watch polls, the same way
+// tools like watch(1)/top do, so each poll reads as the current full
+// state rather than an ever-scrolling list of full reprints.
+func clearScreen() {
+	fmt.Print("\033[H\033[2J")
 }
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `axon - CLI client for the Axon orchestrator
 
 Usage:
-  axon run [--engine URL] <agent_name> "<input>"    Start a run for a registered agent
-  axon status [--engine URL] <run_id>               Show a run's current status and result
+  axon run [--engine URL] <agent_name> "<input>"       Start a run for a registered agent
+  axon status [--engine URL] [--watch] <run_id>        Show a run's current status and result
 
 Environment:
   AXON_ENGINE_URL   Engine API base URL (default: http://localhost:8000), overridden by --engine`)
