@@ -151,4 +151,24 @@ func TestValidateAgentDefinition_DanglingTemplatePlaceholder(t *testing.T) {
 			t.Errorf("expected {{user_input}} to always be valid, got: %v", err)
 		}
 	})
+
+	t.Run("dangling {{...}} .iteration placeholder", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "judge", Type: StepTypeSupervisor, PromptTemplate: "iteration {{missing_step.iteration}}", Options: []string{}, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for a dangling {{...}} .iteration placeholder, got none")
+		}
+	})
+
+	t.Run(".iteration referencing a real, non-supervisor step is valid", func(t *testing.T) {
+		// validateAgentDefinition only checks the referenced step
+		// exists, not its type - matching .output's existing leniency.
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeToolCall, InputTemplate: "{{step_1.iteration}}", DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err != nil {
+			t.Errorf("expected .iteration on a real step ID to be valid regardless of step type, got: %v", err)
+		}
+	})
 }

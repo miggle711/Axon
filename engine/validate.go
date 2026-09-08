@@ -7,15 +7,19 @@ import (
 
 // stepOutputPlaceholder matches {{step_id.output}} references in a
 // template string, capturing step_id. Mirrors the exact format
-// resolveTemplate substitutes (fmt.Sprintf("{{%s.output}}", stepID)), 
+// resolveTemplate substitutes (fmt.Sprintf("{{%s.output}}", stepID)),
 // no whitespace tolerance, since none is supported at resolve time either.
 var stepOutputPlaceholder = regexp.MustCompile(`\{\{([^}]+)\.output\}\}`)
+
+// stepIterationPlaceholder matches {{step_id.iteration}} references,
+// the same way stepOutputPlaceholder matches {{step_id.output}}.
+var stepIterationPlaceholder = regexp.MustCompile(`\{\{([^}]+)\.iteration\}\}`)
 
 // validateAgentDefinition checks that def's steps form a well-formed
 // DAG before any run is created from it: no duplicate step IDs, every
 // step-ID reference (DependsOn, OnTrue, OnFalse, Options) points at a
-// real step, no dependency cycles, and every {{step_id.output}}
-// template placeholder references a real step. 
+// real step, no dependency cycles, and every {{step_id.output}} or
+// {{step_id.iteration}} template placeholder references a real step.
 // Catches mistakes that would otherwise surface as a silent hang (a cycle: no step ever
 // becomes enqueable) or silently-unresolved {{...}} text in a step's
 // input, rather than a clear error, a real risk now that agents can
@@ -71,11 +75,19 @@ func validateAgentDefinition(def AgentDefinition) error {
 			{"prompt_template", step.PromptTemplate},
 			{"condition", step.Condition},
 		} {
-			for _, match := range stepOutputPlaceholder.FindAllStringSubmatch(template.value, -1) {
-				refID := match[1]
-				if !stepIDs[refID] {
-					return fmt.Errorf("agent %q: step %q's %s references unknown step %q via {{%s.output}}",
-						def.Name, step.ID, template.field, refID, refID)
+			for _, placeholderKind := range []struct {
+				suffix string
+				re     *regexp.Regexp
+			}{
+				{"output", stepOutputPlaceholder},
+				{"iteration", stepIterationPlaceholder},
+			} {
+				for _, match := range placeholderKind.re.FindAllStringSubmatch(template.value, -1) {
+					refID := match[1]
+					if !stepIDs[refID] {
+						return fmt.Errorf("agent %q: step %q's %s references unknown step %q via {{%s.%s}}",
+							def.Name, step.ID, template.field, refID, refID, placeholderKind.suffix)
+					}
 				}
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,14 +86,30 @@ func canEnqueueStep(step StepDefinition, run *Run) bool {
 	return true // All dependencies are satisfied, can enqueue
 }
 
-// resolveTemplate substitutes {{user_input}} and {{step_id.output}}
-// placeholders in template with values from run.
+// resolveTemplate substitutes {{user_input}}, {{step_id.output}}, and
+// {{step_id.iteration}} placeholders in template with values from run.
+//
+// {{step_id.iteration}} resolves to run.SupervisorIterations[step_id]
+// (0 before step_id's first decision, since that map only gains an
+// entry once a decision is actually processed as an Options pick -
+// added so a supervisor's own prompt can tell "is this my first
+// decision" directly from run state, instead of the prompt text having
+// to instruct the model to infer that itself (see #56). Iterates
+// run.Steps rather than the (possibly not-yet-populated) map directly,
+// so the placeholder still resolves correctly on a step's very first,
+// pre-any-decision prompt.
 func resolveTemplate(template string, run *Run) string {
 	result := strings.ReplaceAll(template, "{{user_input}}", run.UserInput)
 	for stepID, output := range run.StepResults {
 		placeholder := fmt.Sprintf("{{%s.output}}", stepID)
 		if strings.Contains(result, placeholder) {
 			result = strings.ReplaceAll(result, placeholder, output)
+		}
+	}
+	for _, step := range run.Steps {
+		placeholder := fmt.Sprintf("{{%s.iteration}}", step.ID)
+		if strings.Contains(result, placeholder) {
+			result = strings.ReplaceAll(result, placeholder, strconv.Itoa(run.SupervisorIterations[step.ID]))
 		}
 	}
 	return result

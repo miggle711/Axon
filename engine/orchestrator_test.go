@@ -986,3 +986,46 @@ func TestResolveStepInput(t *testing.T) {
 		t.Errorf("llm_call with no InputTemplate: resolveStepInput() = %q, want %q", got, want)
 	}
 }
+
+// TestResolveTemplate_IterationPlaceholder covers #56's first fix: a
+// supervisor's own prompt can reference {{step_id.iteration}} to know
+// how many times it's already looped, instead of the prompt text
+// having to instruct the model to infer that itself.
+func TestResolveTemplate_IterationPlaceholder(t *testing.T) {
+	t.Run("resolves to 0 before any decision has been made", func(t *testing.T) {
+		// SupervisorIterations has no entry for "judge" yet - this is
+		// the exact case the fix targets: the very first time a
+		// supervisor's prompt is resolved, before handleSupervisorDecision
+		// has ever incremented the map for it.
+		run := &Run{
+			Steps:                []StepDefinition{{ID: "judge", Type: StepTypeSupervisor}},
+			SupervisorIterations: map[string]int{},
+		}
+		got := resolveTemplate("iteration: {{judge.iteration}}", run)
+		if got != "iteration: 0" {
+			t.Errorf("got %q, want %q", got, "iteration: 0")
+		}
+	})
+
+	t.Run("resolves to the current count after decisions have been made", func(t *testing.T) {
+		run := &Run{
+			Steps:                []StepDefinition{{ID: "judge", Type: StepTypeSupervisor}},
+			SupervisorIterations: map[string]int{"judge": 3},
+		}
+		got := resolveTemplate("iteration: {{judge.iteration}}", run)
+		if got != "iteration: 3" {
+			t.Errorf("got %q, want %q", got, "iteration: 3")
+		}
+	})
+
+	t.Run("a non-supervisor step referencing .iteration resolves to 0, not an error", func(t *testing.T) {
+		run := &Run{
+			Steps:                []StepDefinition{{ID: "step_1", Type: StepTypeToolCall}},
+			SupervisorIterations: map[string]int{},
+		}
+		got := resolveTemplate("iteration: {{step_1.iteration}}", run)
+		if got != "iteration: 0" {
+			t.Errorf("got %q, want %q", got, "iteration: 0")
+		}
+	})
+}
