@@ -20,22 +20,28 @@ var stepIterationPlaceholder = regexp.MustCompile(`\{\{([^}]+)\.iteration\}\}`)
 // DAG before any run is created from it: no duplicate step IDs, every
 // step-ID reference (DependsOn, OnTrue, OnFalse, Options) points at a
 // real step, a step's FirstIterationStep (if set) is one of its own
-// Options, no dependency cycles, and every {{step_id.output}} or
-// {{step_id.iteration}} template placeholder references a real step.
-// Catches mistakes that would otherwise surface as a silent hang (a cycle: no step ever
-// becomes enqueable) or silently-unresolved {{...}} text in a step's
-// input, rather than a clear error, a real risk now that agents can
-// be hand-authored JSON files (#7) rather than only constructed
-// directly in Go.
+// Options, no dependency cycles, every {{step_id.output}} or
+// {{step_id.iteration}} template placeholder references a real step,
+// every step's Type is one of the five known step types, and each
+// step has the field its type actually needs to run (a tool for
+// tool_call, a prompt_template for llm_call/supervisor plus at least
+// one option for supervisor, a condition for conditional, an agent for
+// agent_call). Catches mistakes that would otherwise surface as a
+// silent hang (a cycle: no step ever becomes enqueable), silently
+// unresolved {{...}} text in a step's input, or a job the worker can
+// only reject once it's already been dequeued (a typo'd type, or a
+// required field missing), rather than a clear error - a real risk now
+// that agents can be hand-authored JSON files (#7) rather than only
+// constructed directly in Go.
 //
 // Duplicate step IDs and dependency cycles are checked first and
 // returned immediately on their own: every other check assumes a
 // unique, acyclic step set, so continuing past either would risk
 // confusing cascade errors built on a broken foundation. Everything
 // else (dangling references, first_iteration_step, dangling template
-// placeholders) is collected and returned together via errors.Join,
-// so fixing a hand-authored agent doesn't mean one fix-and-rerun cycle
-// per mistake (#54).
+// placeholders, unknown/missing step type fields) is collected and
+// returned together via errors.Join, so fixing a hand-authored agent
+// doesn't mean one fix-and-rerun cycle per mistake (#54).
 func validateAgentDefinition(def AgentDefinition) error {
 	stepIDs := make(map[string]bool, len(def.Steps))
 	for _, step := range def.Steps {
@@ -60,6 +66,14 @@ func validateAgentDefinition(def AgentDefinition) error {
 		}
 	}
 
+	validStepTypes := map[StepType]bool{
+		StepTypeToolCall:    true,
+		StepTypeLLMCall:     true,
+		StepTypeConditional: true,
+		StepTypeAgentCall:   true,
+		StepTypeSupervisor:  true,
+	}
+
 	for _, step := range def.Steps {
 		for _, dep := range step.DependsOn {
 			referencesStep("depends_on", step.ID, dep)
@@ -80,6 +94,48 @@ func validateAgentDefinition(def AgentDefinition) error {
 			if !isOption {
 				errs = append(errs, fmt.Errorf("agent %q: step %q's first_iteration_step %q must be one of its options %v",
 					def.Name, step.ID, step.FirstIterationStep, step.Options))
+			}
+		}
+
+		// A typo'd or unset type (e.g. "tool_cal") falls straight
+		// through every step.Type == StepTypeX check in orchestrator.go
+		// and gets enqueued as a generic job anyway, only failing once
+		// the worker rejects the unrecognized job type - checking the
+		// type itself here, and the required field each type actually
+		// needs (#54), catches both at authoring time instead. Only
+		// checked when step.Type is itself one of the five known
+		// values, so an unrecognized type reports just the one error
+		// instead of also complaining about "missing" fields that
+		// wouldn't even apply to whatever the author actually meant.
+		if !validStepTypes[step.Type] {
+			errs = append(errs, fmt.Errorf("agent %q: step %q has unknown type %q (must be one of tool_call, llm_call, conditional, agent_call, supervisor)",
+				def.Name, step.ID, step.Type))
+			continue
+		}
+
+		switch step.Type {
+		case StepTypeToolCall:
+			if step.Tool == "" {
+				errs = append(errs, fmt.Errorf("agent %q: step %q is a tool_call step but has no tool set", def.Name, step.ID))
+			}
+		case StepTypeLLMCall:
+			if step.PromptTemplate == "" {
+				errs = append(errs, fmt.Errorf("agent %q: step %q is an llm_call step but has no prompt_template set", def.Name, step.ID))
+			}
+		case StepTypeSupervisor:
+			if step.PromptTemplate == "" {
+				errs = append(errs, fmt.Errorf("agent %q: step %q is a supervisor step but has no prompt_template set", def.Name, step.ID))
+			}
+			if len(step.Options) == 0 {
+				errs = append(errs, fmt.Errorf("agent %q: step %q is a supervisor step but has no options set", def.Name, step.ID))
+			}
+		case StepTypeConditional:
+			if step.Condition == "" {
+				errs = append(errs, fmt.Errorf("agent %q: step %q is a conditional step but has no condition set", def.Name, step.ID))
+			}
+		case StepTypeAgentCall:
+			if step.Agent == "" {
+				errs = append(errs, fmt.Errorf("agent %q: step %q is an agent_call step but has no agent set", def.Name, step.ID))
 			}
 		}
 	}
