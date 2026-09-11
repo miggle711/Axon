@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -155,7 +156,13 @@ func pollOnce(ctx context.Context, httpClient *http.Client, queueURL, engineURL 
 		log.Error("failed to notify engine", "error", err)
 		return
 	}
-	_ = webhookResp.Body.Close()
+	defer func() { _ = webhookResp.Body.Close() }()
+
+	if webhookResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(webhookResp.Body)
+		log.Error("engine rejected completion webhook", "status", webhookResp.StatusCode, "body", string(body))
+		return
+	}
 
 	log.Info("processed step")
 }
@@ -227,7 +234,12 @@ func notifyEngineOfFailure(ctx context.Context, httpClient *http.Client, engineU
 		log.Error("failed to notify engine of failure", "error", err)
 		return
 	}
-	_ = webhookResp.Body.Close()
+	defer func() { _ = webhookResp.Body.Close() }()
+
+	if webhookResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(webhookResp.Body)
+		log.Error("engine rejected failure webhook", "status", webhookResp.StatusCode, "body", string(body))
+	}
 }
 
 // StepRunner executes a step's payload and returns its output. Each job
