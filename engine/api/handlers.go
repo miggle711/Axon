@@ -3,6 +3,7 @@ package api
 import (
 	engine "axon-engine"
 	"errors"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
@@ -66,6 +67,33 @@ func (s *Server) getRunHandler(c *gin.Context) {
 	}
 
 	c.JSON(200, run)
+}
+
+// listRunsHandler lists top-level runs, newest first (#53). Query
+// params: agent_name and status filter (both optional, ANDed
+// together), limit and offset paginate (limit defaults to 20, capped
+// at 100 - see engine.ListRunsOptions). An unparseable limit/offset is
+// treated as unset rather than rejected, since defaulting silently is
+// friendlier for a list endpoint someone's likely to hit by hand.
+func (s *Server) listRunsHandler(c *gin.Context) {
+	opts := engine.ListRunsOptions{
+		AgentName: c.Query("agent_name"),
+		Status:    c.Query("status"),
+	}
+	if limit, err := strconv.Atoi(c.Query("limit")); err == nil {
+		opts.Limit = limit
+	}
+	if offset, err := strconv.Atoi(c.Query("offset")); err == nil {
+		opts.Offset = offset
+	}
+
+	runs, err := s.orchestrator.ListRuns(c.Request.Context(), opts)
+	if err != nil {
+		c.JSON(500, ErrorResponse{Error: "Failed to list runs", Code: 500})
+		return
+	}
+
+	c.JSON(200, runs)
 }
 
 func (s *Server) createRunHandler(c *gin.Context) {

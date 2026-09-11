@@ -364,6 +364,12 @@ func (orchestrator *Orchestrator) GetRun(ctx context.Context, runID string) (*Ru
 	return orchestrator.store.GetRun(ctx, runID)
 }
 
+// ListRuns lists top-level runs (see RunStore.ListRuns), filtered and
+// paginated by opts (#53).
+func (orchestrator *Orchestrator) ListRuns(ctx context.Context, opts ListRunsOptions) ([]*Run, error) {
+	return orchestrator.store.ListRuns(ctx, opts)
+}
+
 func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload WebhookPayload) error {
 	log := orchestrator.logger.With("run_id", payload.RunID, "step_id", payload.StepID)
 	log.Info("step completed", "output_preview", previewText(payload.Output))

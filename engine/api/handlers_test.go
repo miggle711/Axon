@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -31,6 +32,26 @@ func (s *fakeRunStore) SaveRun(ctx context.Context, run *engine.Run) error {
 
 func (s *fakeRunStore) GetRun(ctx context.Context, runID string) (*engine.Run, error) {
 	return s.runs[runID], nil
+}
+
+func (s *fakeRunStore) ListRuns(ctx context.Context, opts engine.ListRunsOptions) ([]*engine.Run, error) {
+	var matched []*engine.Run
+	for _, run := range s.runs {
+		if run.ParentRunID != "" {
+			continue
+		}
+		if opts.AgentName != "" && run.AgentName != opts.AgentName {
+			continue
+		}
+		if opts.Status != "" && run.Status != opts.Status {
+			continue
+		}
+		matched = append(matched, run)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].CreatedAt.After(matched[j].CreatedAt)
+	})
+	return matched, nil
 }
 
 func newFakeQueueServer(t *testing.T) *httptest.Server {
@@ -211,5 +232,40 @@ func TestWebhookFailedHandler_RejectsMissingFields(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 when reason is missing, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestListRunsHandler_QueryParams covers #53's GET /runs endpoint:
+// agent_name and status filters are parsed from query params and
+// passed through to the orchestrator/store.
+func TestListRunsHandler_QueryParams(t *testing.T) {
+	def := engine.AgentDefinition{
+		Name:  "greeter",
+		Steps: []engine.StepDefinition{{ID: "greet", Type: engine.StepTypeToolCall, Tool: "echo", InputTemplate: "hi", DependsOn: []string{}}},
+	}
+	server := newTestServer(t, engine.MapAgentRegistry{"greeter": def})
+
+	createBody, _ := json.Marshal(map[string]string{"agent_name": "greeter", "input": "world"})
+	doRequest(t, server, http.MethodPost, "/runs", createBody)
+	doRequest(t, server, http.MethodPost, "/runs", createBody)
+
+	w := doRequest(t, server, http.MethodGet, "/runs?agent_name=greeter", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var runs []engine.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &runs); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs for agent_name=greeter, got %d", len(runs))
+	}
+
+	w = doRequest(t, server, http.MethodGet, "/runs?agent_name=does_not_exist", nil)
+	if err := json.Unmarshal(w.Body.Bytes(), &runs); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("expected 0 runs for an agent_name with no matching runs, got %d", len(runs))
 	}
 }

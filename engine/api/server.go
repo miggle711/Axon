@@ -28,6 +28,7 @@ func (s *Server) setupRoutes() {
 	s.router.POST("/webhook/complete", s.webhookCompleteHandler)
 	s.router.POST("/webhook/failed", s.webhookFailedHandler)
 	s.router.GET("/runs/:id", s.getRunHandler)
+	s.router.GET("/runs", s.listRunsHandler)
 	s.router.POST("/runs", s.createRunHandler)
 }
 

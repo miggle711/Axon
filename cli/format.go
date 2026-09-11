@@ -60,6 +60,22 @@ func FormatRunStatus(run *engine.Run) string {
 	return b.String()
 }
 
+// FormatRunList renders runs as a compact, one-line-per-run table:
+// run ID, agent name, status, and creation time (#53). Runs is assumed
+// already sorted (newest first, per engine.ListRunsOptions).
+func FormatRunList(runs []*engine.Run) string {
+	if len(runs) == 0 {
+		return "No runs found.\n"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-38s %-24s %-12s %s\n", "RUN ID", "AGENT", "STATUS", "CREATED")
+	for _, run := range runs {
+		fmt.Fprintf(&b, "%-38s %-24s %-12s %s\n", run.ID, run.AgentName, run.Status, run.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+	}
+	return b.String()
+}
+
 func stateGlyph(state string) string {
 	switch state {
 	case "completed":

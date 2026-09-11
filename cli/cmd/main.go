@@ -39,6 +39,8 @@ func main() {
 		runCommand(ctx, os.Args[2:])
 	case "status":
 		statusCommand(ctx, os.Args[2:])
+	case "list":
+		listCommand(ctx, os.Args[2:])
 	default:
 		printUsage()
 		os.Exit(1)
@@ -132,6 +134,29 @@ func statusCommand(ctx context.Context, args []string) {
 	}
 }
 
+func listCommand(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	fs.String("engine", "", "Engine API base URL (default: $AXON_ENGINE_URL, or "+defaultEngineURL+")")
+	agentName := fs.String("agent", "", "Only show runs for this agent")
+	status := fs.String("status", "", "Only show runs with this status (in_progress, completed, failed)")
+	limit := fs.Int("limit", 0, "Max runs to show (default: 20, capped at 100)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: axon list [--engine URL] [--agent NAME] [--status STATUS] [--limit N]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	client := cli.NewClient(engineURL(fs))
+	runs, err := client.ListRuns(ctx, *agentName, *status, *limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(cli.FormatRunList(runs))
+}
+
 // clearScreen wipes the terminal between --watch polls, the same way
 // tools like watch(1)/top do, so each poll reads as the current full
 // state rather than an ever-scrolling list of full reprints.
@@ -145,6 +170,8 @@ func printUsage() {
 Usage:
   axon run [--engine URL] <agent_name> "<input>"       Start a run for a registered agent
   axon status [--engine URL] [--watch] <run_id>        Show a run's current status and result
+  axon list [--engine URL] [--agent NAME] [--status STATUS] [--limit N]
+                                                        List recent runs
 
 Environment:
   AXON_ENGINE_URL   Engine API base URL (default: http://localhost:8000), overridden by --engine`)

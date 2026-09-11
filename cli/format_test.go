@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 	"testing"
+	"time"
 
 	engine "axon-engine"
 )
@@ -114,5 +115,26 @@ func TestFormatRunStatus_TruncatesLongOutput(t *testing.T) {
 	}
 	if !strings.Contains(output, "...") {
 		t.Error("expected truncated output to end with '...'")
+	}
+}
+
+func TestFormatRunList_Empty(t *testing.T) {
+	output := FormatRunList(nil)
+	if !strings.Contains(output, "No runs found") {
+		t.Errorf("expected an empty list to say so, got:\n%s", output)
+	}
+}
+
+func TestFormatRunList_ShowsEachRun(t *testing.T) {
+	runs := []*engine.Run{
+		{ID: "run-1", AgentName: "greeter", Status: "completed", CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)},
+		{ID: "run-2", AgentName: "research_agent", Status: "in_progress", CreatedAt: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)},
+	}
+
+	output := FormatRunList(runs)
+	for _, want := range []string{"run-1", "greeter", "completed", "run-2", "research_agent", "in_progress"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("expected output to contain %q, got:\n%s", want, output)
+		}
 	}
 }
