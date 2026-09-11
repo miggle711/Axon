@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateAgentDefinition_Valid(t *testing.T) {
 	def := AgentDefinition{
@@ -212,4 +215,32 @@ func TestValidateAgentDefinition_DanglingTemplatePlaceholder(t *testing.T) {
 			t.Errorf("expected .iteration on a real step ID to be valid regardless of step type, got: %v", err)
 		}
 	})
+}
+
+// TestValidateAgentDefinition_CollectsAllErrors covers #54: fixing a
+// hand-authored agent one mistake at a time, rerunning validation after
+// each fix, is exactly the friction this is meant to remove. A def with
+// several independent mistakes should report all of them from a single
+// call, not just the first one found.
+func TestValidateAgentDefinition_CollectsAllErrors(t *testing.T) {
+	def := AgentDefinition{
+		Name: "a",
+		Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeToolCall, DependsOn: []string{"missing_dep"}},
+			{ID: "step_2", Type: StepTypeConditional, Condition: "{{user_input}} == x", OnTrue: "missing_on_true", DependsOn: []string{}},
+			{ID: "step_3", Type: StepTypeToolCall, InputTemplate: "{{missing_placeholder.output}}", DependsOn: []string{}},
+		},
+	}
+
+	err := validateAgentDefinition(def)
+	if err == nil {
+		t.Fatal("expected errors for a def with 3 independent mistakes, got none")
+	}
+
+	msg := err.Error()
+	for _, want := range []string{"missing_dep", "missing_on_true", "missing_placeholder"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected the combined error to mention %q, got: %s", want, msg)
+		}
+	}
 }

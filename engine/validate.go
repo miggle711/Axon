@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 )
@@ -26,6 +27,15 @@ var stepIterationPlaceholder = regexp.MustCompile(`\{\{([^}]+)\.iteration\}\}`)
 // input, rather than a clear error, a real risk now that agents can
 // be hand-authored JSON files (#7) rather than only constructed
 // directly in Go.
+//
+// Duplicate step IDs and dependency cycles are checked first and
+// returned immediately on their own: every other check assumes a
+// unique, acyclic step set, so continuing past either would risk
+// confusing cascade errors built on a broken foundation. Everything
+// else (dangling references, first_iteration_step, dangling template
+// placeholders) is collected and returned together via errors.Join,
+// so fixing a hand-authored agent doesn't mean one fix-and-rerun cycle
+// per mistake (#54).
 func validateAgentDefinition(def AgentDefinition) error {
 	stepIDs := make(map[string]bool, len(def.Steps))
 	for _, step := range def.Steps {
@@ -35,32 +45,29 @@ func validateAgentDefinition(def AgentDefinition) error {
 		stepIDs[step.ID] = true
 	}
 
-	referencesStep := func(field, stepID, refersTo string) error {
+	if cyclePath, ok := findDependencyCycle(def.Steps); ok {
+		return fmt.Errorf("agent %q: dependency cycle detected: %s", def.Name, cyclePath)
+	}
+
+	var errs []error
+
+	referencesStep := func(field, stepID, refersTo string) {
 		if refersTo == "" {
-			return nil // empty is valid: e.g. a conditional branch that intentionally does nothing
+			return // empty is valid: e.g. a conditional branch that intentionally does nothing
 		}
 		if !stepIDs[refersTo] {
-			return fmt.Errorf("agent %q: step %q's %s references unknown step %q", def.Name, stepID, field, refersTo)
+			errs = append(errs, fmt.Errorf("agent %q: step %q's %s references unknown step %q", def.Name, stepID, field, refersTo))
 		}
-		return nil
 	}
 
 	for _, step := range def.Steps {
 		for _, dep := range step.DependsOn {
-			if err := referencesStep("depends_on", step.ID, dep); err != nil {
-				return err
-			}
+			referencesStep("depends_on", step.ID, dep)
 		}
-		if err := referencesStep("on_true", step.ID, step.OnTrue); err != nil {
-			return err
-		}
-		if err := referencesStep("on_false", step.ID, step.OnFalse); err != nil {
-			return err
-		}
+		referencesStep("on_true", step.ID, step.OnTrue)
+		referencesStep("on_false", step.ID, step.OnFalse)
 		for _, opt := range step.Options {
-			if err := referencesStep("options", step.ID, opt); err != nil {
-				return err
-			}
+			referencesStep("options", step.ID, opt)
 		}
 		if step.FirstIterationStep != "" {
 			isOption := false
@@ -71,14 +78,10 @@ func validateAgentDefinition(def AgentDefinition) error {
 				}
 			}
 			if !isOption {
-				return fmt.Errorf("agent %q: step %q's first_iteration_step %q must be one of its options %v",
-					def.Name, step.ID, step.FirstIterationStep, step.Options)
+				errs = append(errs, fmt.Errorf("agent %q: step %q's first_iteration_step %q must be one of its options %v",
+					def.Name, step.ID, step.FirstIterationStep, step.Options))
 			}
 		}
-	}
-
-	if cyclePath, ok := findDependencyCycle(def.Steps); ok {
-		return fmt.Errorf("agent %q: dependency cycle detected: %s", def.Name, cyclePath)
 	}
 
 	for _, step := range def.Steps {
@@ -99,15 +102,15 @@ func validateAgentDefinition(def AgentDefinition) error {
 				for _, match := range placeholderKind.re.FindAllStringSubmatch(template.value, -1) {
 					refID := match[1]
 					if !stepIDs[refID] {
-						return fmt.Errorf("agent %q: step %q's %s references unknown step %q via {{%s.%s}}",
-							def.Name, step.ID, template.field, refID, refID, placeholderKind.suffix)
+						errs = append(errs, fmt.Errorf("agent %q: step %q's %s references unknown step %q via {{%s.%s}}",
+							def.Name, step.ID, template.field, refID, refID, placeholderKind.suffix))
 					}
 				}
 			}
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // findDependencyCycle runs a DFS with three-color marking over steps'
