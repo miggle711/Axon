@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -11,6 +12,14 @@ import (
 
 	uuid "github.com/google/uuid"
 )
+
+// ErrInvalidAgentDefinition wraps every error createRun returns from a
+// failed validateAgentDefinition call, so a caller (the API handler,
+// in particular) can tell "this agent is malformed" (the caller's
+// mistake, worth a 400 with the real message) apart from a genuine
+// internal failure (worth a 500 with a generic message) via errors.Is,
+// without parsing error text (#54).
+var ErrInvalidAgentDefinition = errors.New("invalid agent definition")
 
 type Orchestrator struct {
 	store       RunStore
@@ -193,7 +202,7 @@ func (orchestrator *Orchestrator) CreateRunByName(ctx context.Context, agentName
 func (orchestrator *Orchestrator) createRun(ctx context.Context, definition AgentDefinition, userInput string, parentRunID, parentStepID string) (*Run, error) {
 	if err := validateAgentDefinition(definition); err != nil {
 		orchestrator.logger.Error("invalid agent definition", "agent_name", definition.Name, "error", err)
-		return nil, fmt.Errorf("invalid agent definition: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAgentDefinition, err)
 	}
 
 	id, err := uuid.NewV7()
