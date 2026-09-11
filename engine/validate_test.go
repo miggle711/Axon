@@ -9,9 +9,9 @@ func TestValidateAgentDefinition_Valid(t *testing.T) {
 	def := AgentDefinition{
 		Name: "valid_agent",
 		Steps: []StepDefinition{
-			{ID: "step_1", Type: StepTypeToolCall, InputTemplate: "{{user_input}}", DependsOn: []string{}},
+			{ID: "step_1", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "{{user_input}}", DependsOn: []string{}},
 			{ID: "step_2", Type: StepTypeConditional, Condition: "{{step_1.output}} == success", OnTrue: "step_3", OnFalse: "", DependsOn: []string{"step_1"}},
-			{ID: "step_3", Type: StepTypeToolCall, InputTemplate: "{{step_1.output}} and {{step_2.output}}", DependsOn: []string{"step_2"}},
+			{ID: "step_3", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "{{step_1.output}} and {{step_2.output}}", DependsOn: []string{"step_2"}},
 		},
 	}
 	if err := validateAgentDefinition(def); err != nil {
@@ -104,7 +104,7 @@ func TestValidateAgentDefinition_FirstIterationStep(t *testing.T) {
 			Name: "a",
 			Steps: []StepDefinition{
 				{ID: "supervisor_step", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{"option_a"}, FirstIterationStep: "option_a", DependsOn: []string{}},
-				{ID: "option_a", Type: StepTypeToolCall, DependsOn: []string{"supervisor_step"}},
+				{ID: "option_a", Type: StepTypeToolCall, Tool: "echo", DependsOn: []string{"supervisor_step"}},
 			},
 		}
 		if err := validateAgentDefinition(def); err != nil {
@@ -117,7 +117,7 @@ func TestValidateAgentDefinition_FirstIterationStep(t *testing.T) {
 			Name: "a",
 			Steps: []StepDefinition{
 				{ID: "supervisor_step", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{"option_a"}, DependsOn: []string{}},
-				{ID: "option_a", Type: StepTypeToolCall, DependsOn: []string{"supervisor_step"}},
+				{ID: "option_a", Type: StepTypeToolCall, Tool: "echo", DependsOn: []string{"supervisor_step"}},
 			},
 		}
 		if err := validateAgentDefinition(def); err != nil {
@@ -189,7 +189,7 @@ func TestValidateAgentDefinition_DanglingTemplatePlaceholder(t *testing.T) {
 
 	t.Run("{{user_input}} is always valid", func(t *testing.T) {
 		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
-			{ID: "step_1", Type: StepTypeToolCall, InputTemplate: "{{user_input}}", DependsOn: []string{}},
+			{ID: "step_1", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "{{user_input}}", DependsOn: []string{}},
 		}}
 		if err := validateAgentDefinition(def); err != nil {
 			t.Errorf("expected {{user_input}} to always be valid, got: %v", err)
@@ -209,10 +209,96 @@ func TestValidateAgentDefinition_DanglingTemplatePlaceholder(t *testing.T) {
 		// validateAgentDefinition only checks the referenced step
 		// exists, not its type - matching .output's existing leniency.
 		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
-			{ID: "step_1", Type: StepTypeToolCall, InputTemplate: "{{step_1.iteration}}", DependsOn: []string{}},
+			{ID: "step_1", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "{{step_1.iteration}}", DependsOn: []string{}},
 		}}
 		if err := validateAgentDefinition(def); err != nil {
 			t.Errorf("expected .iteration on a real step ID to be valid regardless of step type, got: %v", err)
+		}
+	})
+}
+
+func TestValidateAgentDefinition_UnknownStepType(t *testing.T) {
+	def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+		{ID: "step_1", Type: "tool_cal", Tool: "echo", DependsOn: []string{}}, // typo'd type
+	}}
+	err := validateAgentDefinition(def)
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized step type, got none")
+	}
+	if !strings.Contains(err.Error(), "tool_cal") {
+		t.Errorf("expected the error to mention the bad type value, got: %v", err)
+	}
+}
+
+// TestValidateAgentDefinition_RequiredFieldsPerStepType covers #54: a
+// step missing the one field its type actually needs to run used to
+// only fail once the worker rejected the resulting job at runtime
+// (empty tool name, empty prompt, etc), not at authoring time.
+func TestValidateAgentDefinition_RequiredFieldsPerStepType(t *testing.T) {
+	t.Run("tool_call needs tool", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeToolCall, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for a tool_call step with no tool, got none")
+		}
+	})
+
+	t.Run("llm_call needs prompt_template", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeLLMCall, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for an llm_call step with no prompt_template, got none")
+		}
+	})
+
+	t.Run("supervisor needs prompt_template", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeSupervisor, Options: []string{"opt"}, DependsOn: []string{}},
+			{ID: "opt", Type: StepTypeToolCall, Tool: "echo", DependsOn: []string{"step_1"}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for a supervisor step with no prompt_template, got none")
+		}
+	})
+
+	t.Run("supervisor needs at least one option", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{}, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for a supervisor step with no options, got none")
+		}
+	})
+
+	t.Run("conditional needs condition", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeConditional, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for a conditional step with no condition, got none")
+		}
+	})
+
+	t.Run("agent_call needs agent", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeAgentCall, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err == nil {
+			t.Fatal("expected an error for an agent_call step with no agent, got none")
+		}
+	})
+
+	t.Run("a fully specified step of each type is valid", func(t *testing.T) {
+		def := AgentDefinition{Name: "a", Steps: []StepDefinition{
+			{ID: "tool_step", Type: StepTypeToolCall, Tool: "echo", DependsOn: []string{}},
+			{ID: "llm_step", Type: StepTypeLLMCall, PromptTemplate: "hi", DependsOn: []string{}},
+			{ID: "cond_step", Type: StepTypeConditional, Condition: "{{user_input}} == x", DependsOn: []string{}},
+			{ID: "supervisor_step", Type: StepTypeSupervisor, PromptTemplate: "decide", Options: []string{"tool_step"}, DependsOn: []string{}},
+		}}
+		if err := validateAgentDefinition(def); err != nil {
+			t.Errorf("expected a fully specified agent to validate cleanly, got: %v", err)
 		}
 	})
 }
