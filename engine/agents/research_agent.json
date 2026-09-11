@@ -1,21 +1,22 @@
 {
   "name": "research_agent",
-  "description": "Searches the web via Tavily, has an LLM supervisor judge whether the results are sufficient (re-searching up to the iteration cap if not), then synthesizes a final answer. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker. Built for #39: exercises supervisor against real, unpredictable LLM output rather than simulated test payloads.",
+  "description": "Has an LLM supervisor judge whether web search results (via Tavily) are sufficient to answer a question, re-searching up to the iteration cap if not, then synthesizes a final answer. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker. Built for #39: exercises supervisor against real, unpredictable LLM output rather than simulated test payloads. judge has no depends_on and no prior search to judge on iteration 0, so first_iteration_step (#56) forces its first move to be search structurally, instead of relying on prompt text to make the model say 'search' first. This isn't just a nicety: handleSupervisorDecision requires at least one option to have run before 'done' is valid, since judge's own result comes from the last option's output, and a live Groq call once confirmed the model will say 'done' immediately given the chance, which the engine then correctly rejects with no usable result to fall back on.",
   "output_step": "answer",
   "steps": [
+    {
+      "id": "judge",
+      "type": "supervisor",
+      "prompt_template": "You are deciding whether web search results are sufficient to answer a question.\n\nQuestion: {{user_input}}\n\nMost recent search results:\n{{search.output}}\n\nIf the results so far are sufficient to answer the question, respond with exactly: done\nOtherwise, respond with exactly: search\n\nRespond with only one of those two words, nothing else.",
+      "options": ["search"],
+      "first_iteration_step": "search",
+      "depends_on": []
+    },
     {
       "id": "search",
       "type": "tool_call",
       "tool": "tavily_search",
       "input_template": "{{user_input}}",
-      "depends_on": []
-    },
-    {
-      "id": "judge",
-      "type": "supervisor",
-      "prompt_template": "You are deciding whether web search results are sufficient to answer a question. You will be asked this repeatedly as new searches run.\n\nQuestion: {{user_input}}\n\nMost recent search results:\n{{search.output}}\n\nRules:\n- The very first time you are asked this (before any additional search has run beyond the original one), always respond with exactly: search\n- On every later time you are asked, if the results so far are sufficient to answer the question, respond with exactly: done\n- Otherwise, respond with exactly: search\n\nRespond with only one of those two words, nothing else.",
-      "options": ["search"],
-      "depends_on": ["search"]
+      "depends_on": ["judge"]
     },
     {
       "id": "answer",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,14 +86,30 @@ func canEnqueueStep(step StepDefinition, run *Run) bool {
 	return true // All dependencies are satisfied, can enqueue
 }
 
-// resolveTemplate substitutes {{user_input}} and {{step_id.output}}
-// placeholders in template with values from run.
+// resolveTemplate substitutes {{user_input}}, {{step_id.output}}, and
+// {{step_id.iteration}} placeholders in template with values from run.
+//
+// {{step_id.iteration}} resolves to run.SupervisorIterations[step_id]
+// (0 before step_id's first decision, since that map only gains an
+// entry once a decision is actually processed as an Options pick -
+// added so a supervisor's own prompt can tell "is this my first
+// decision" directly from run state, instead of the prompt text having
+// to instruct the model to infer that itself (see #56). Iterates
+// run.Steps rather than the (possibly not-yet-populated) map directly,
+// so the placeholder still resolves correctly on a step's very first,
+// pre-any-decision prompt.
 func resolveTemplate(template string, run *Run) string {
 	result := strings.ReplaceAll(template, "{{user_input}}", run.UserInput)
 	for stepID, output := range run.StepResults {
 		placeholder := fmt.Sprintf("{{%s.output}}", stepID)
 		if strings.Contains(result, placeholder) {
 			result = strings.ReplaceAll(result, placeholder, output)
+		}
+	}
+	for _, step := range run.Steps {
+		placeholder := fmt.Sprintf("{{%s.iteration}}", step.ID)
+		if strings.Contains(result, placeholder) {
+			result = strings.ReplaceAll(result, placeholder, strconv.Itoa(run.SupervisorIterations[step.ID]))
 		}
 	}
 	return result
@@ -211,6 +228,15 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 				}
 				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
 				log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
+				changed = true
+				continue
+			}
+
+			if step.Type == StepTypeSupervisor {
+				if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
+					log.Error("failed to enqueue supervisor decision", "step_id", step.ID, "error", err)
+					return nil, err
+				}
 				changed = true
 				continue
 			}
@@ -569,8 +595,37 @@ func findStep(steps []StepDefinition, stepID string) (StepDefinition, bool) {
 // comes back through the normal webhook path, where OnStepCompleted
 // recognizes it as a supervisor step and routes to
 // handleSupervisorDecision instead of normal DAG progression.
+//
+// If supervisorStep.FirstIterationStep is set and no decision has been
+// made for it yet (SupervisorIterations has no entry), the LLM call is
+// skipped entirely for this one iteration: FirstIterationStep is
+// enqueued directly, the same way an LLM-chosen option would be (see
+// #56) - no model round trip needed to arrive at a fixed first move.
 func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context, run *Run, supervisorStep StepDefinition) error {
 	log := orchestrator.logger.With("run_id", run.ID, "step_id", supervisorStep.ID)
+
+	if supervisorStep.FirstIterationStep != "" {
+		if _, decided := run.SupervisorIterations[supervisorStep.ID]; !decided {
+			optionStep, ok := findStep(run.Steps, supervisorStep.FirstIterationStep)
+			if !ok {
+				log.Error("first_iteration_step is not a step in this run", "first_iteration_step", supervisorStep.FirstIterationStep)
+				return fmt.Errorf("supervisor step %s: first_iteration_step %q is not a step in this run", supervisorStep.ID, supervisorStep.FirstIterationStep)
+			}
+			run.SupervisorIterations[supervisorStep.ID]++
+			run.ActiveSupervisorChoice[supervisorStep.ID] = supervisorStep.FirstIterationStep
+			// Mark the supervisor step itself as "enqueued" too (no LLM
+			// job actually backs this entry), so canEnqueueStep doesn't
+			// see it as still pending and re-run this branch on the next
+			// pass through the resolve loop.
+			run.EnqueuedSteps[supervisorStep.ID] = "auto:" + supervisorStep.FirstIterationStep
+			if err := orchestrator.store.SaveRun(ctx, run); err != nil {
+				log.Error("failed to save updated run", "error", err)
+				return fmt.Errorf("failed to save updated run: %v", err)
+			}
+			log.Info("first iteration step auto-picked, skipping LLM decision", "first_iteration_step", supervisorStep.FirstIterationStep)
+			return orchestrator.enqueueOptionStep(ctx, run, optionStep)
+		}
+	}
 
 	jobID, err := orchestrator.queueClient.Enqueue(
 		ctx,

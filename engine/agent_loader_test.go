@@ -121,3 +121,64 @@ func TestAgentsDir_GreeterCallerEndToEnd(t *testing.T) {
 		t.Errorf("expected after_greeting to be enqueued once the child run completed, got EnqueuedSteps=%v", run.EnqueuedSteps)
 	}
 }
+
+// TestAgentsDir_MultiSourceResearchFanIn loads the real
+// multi_source_research_agent.json and proves its fan-in dependency
+// (answer depends_on both background_search and recent_search) is
+// respected: answer must not enqueue until BOTH sources have
+// completed, not just the first one to finish.
+func TestAgentsDir_MultiSourceResearchFanIn(t *testing.T) {
+	registry, err := LoadAgentsFromDir("agents")
+	if err != nil {
+		t.Fatalf("LoadAgentsFromDir(\"agents\") failed: %v", err)
+	}
+
+	def, ok := registry.Get("multi_source_research_agent")
+	if !ok {
+		t.Fatal("expected multi_source_research_agent to be loaded from engine/agents/")
+	}
+
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry, discardLogger)
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, def, "what is the James Webb Space Telescope")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	if _, enqueued := run.EnqueuedSteps["background_search"]; !enqueued {
+		t.Fatalf("expected background_search to be enqueued after CreateRun, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+	if _, enqueued := run.EnqueuedSteps["recent_search"]; !enqueued {
+		t.Fatalf("expected recent_search to be enqueued after CreateRun, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+
+	// Complete only the first source. answer must NOT enqueue yet -
+	// this is the actual fan-in behavior under test.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "background_search", Output: "general background info"}); err != nil {
+		t.Fatalf("OnStepCompleted(background_search) failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if _, enqueued := run.EnqueuedSteps["answer"]; enqueued {
+		t.Fatalf("expected answer NOT to be enqueued with only one of two sources completed, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+
+	// Complete the second source. Now answer should enqueue.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "recent_search", Output: "recent developments info"}); err != nil {
+		t.Fatalf("OnStepCompleted(recent_search) failed: %v", err)
+	}
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if _, enqueued := run.EnqueuedSteps["answer"]; !enqueued {
+		t.Fatalf("expected answer to be enqueued once both sources completed, got EnqueuedSteps=%v", run.EnqueuedSteps)
+	}
+}
