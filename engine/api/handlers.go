@@ -2,6 +2,8 @@ package api
 
 import (
 	engine "axon-engine"
+	"errors"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -88,6 +90,14 @@ func (s *Server) createRunHandler(c *gin.Context) {
 		run, err = s.orchestrator.CreateRun(c.Request.Context(), *request.Definition, request.Input)
 	}
 	if err != nil {
+		// A malformed agent definition is the caller's mistake, not an
+		// internal failure - surface validateAgentDefinition's actual
+		// message (which now collects every problem found, not just
+		// the first, see #54) instead of a generic 500 that hides it.
+		if errors.Is(err, engine.ErrInvalidAgentDefinition) {
+			c.JSON(400, ErrorResponse{Error: err.Error(), Code: 400})
+			return
+		}
 		c.JSON(500, ErrorResponse{Error: "Failed to create run", Code: 500})
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	engine "axon-engine"
@@ -140,6 +141,34 @@ func TestCreateRunHandler_UnknownAgentName(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 for an unknown agent name, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestCreateRunHandler_InvalidDefinitionReturns400WithDetail covers
+// #54: a malformed agent definition used to come back as a generic
+// 500, giving whoever's authoring the agent no way to see what was
+// actually wrong short of reading the engine's own server log. Now it
+// should be a 400 carrying validateAgentDefinition's real message
+// (collected across every problem found, not just the first).
+func TestCreateRunHandler_InvalidDefinitionReturns400WithDetail(t *testing.T) {
+	server := newTestServer(t, engine.MapAgentRegistry{})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"definition": engine.AgentDefinition{
+			Name: "broken_agent",
+			Steps: []engine.StepDefinition{
+				{ID: "step_1", Type: engine.StepTypeToolCall, DependsOn: []string{"missing_dep"}},
+			},
+		},
+		"input": "hello",
+	})
+	w := doRequest(t, server, http.MethodPost, "/runs", body)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an invalid agent definition, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "missing_dep") {
+		t.Errorf("expected the response body to include validateAgentDefinition's real message, got: %s", w.Body.String())
 	}
 }
 
