@@ -91,6 +91,9 @@ func (s *fakeRunStore) ListRuns(ctx context.Context, opts ListRunsOptions) ([]*R
 		limit = defaultListRunsLimit
 	}
 	start := opts.Offset
+	if start < 0 {
+		start = 0
+	}
 	if start > len(matched) {
 		start = len(matched)
 	}

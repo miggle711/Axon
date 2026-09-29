@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -119,10 +121,21 @@ func (s *RedisRunStore) ListRuns(ctx context.Context, opts ListRunsOptions) ([]*
 	key := runsByTimeKey()
 	switch {
 	case opts.AgentName != "" && opts.Status != "":
-		key = fmt.Sprintf("runs:by_agent_status:%s:%s", opts.AgentName, opts.Status)
-		if err := s.client.ZInterStore(ctx, key, &redis.ZStore{
+		// A key shared across every caller filtering on the same
+		// agent+status would let two concurrent requests overwrite or
+		// delete each other's ZINTERSTORE result mid-read - suffixing
+		// with a fresh UUID per call keeps this request's temporary
+		// key unique regardless of what anyone else is doing
+		// concurrently. A short TTL is a backstop in case the deferred
+		// Del below never runs (e.g. the process is killed), not the
+		// actual isolation mechanism.
+		key = "runs:tmp:by_agent_status:" + uuid.NewString()
+		pipe := s.client.TxPipeline()
+		pipe.ZInterStore(ctx, key, &redis.ZStore{
 			Keys: []string{runsByAgentKey(opts.AgentName), runsByStatusKey(opts.Status)},
-		}).Err(); err != nil {
+		})
+		pipe.Expire(ctx, key, 30*time.Second)
+		if _, err := pipe.Exec(ctx); err != nil {
 			return nil, err
 		}
 		defer s.client.Del(ctx, key)
@@ -133,6 +146,9 @@ func (s *RedisRunStore) ListRuns(ctx context.Context, opts ListRunsOptions) ([]*
 	}
 
 	start := int64(opts.Offset)
+	if start < 0 {
+		start = 0 // a client-supplied negative offset would otherwise count from the end in ZRANGE instead of clamping to the first page
+	}
 	stop := start + int64(limit) - 1
 	ids, err := s.client.ZRangeArgs(ctx, redis.ZRangeArgs{
 		Key: key, Start: start, Stop: stop, Rev: true,
