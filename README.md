@@ -117,13 +117,14 @@ go run ./cmd status <run_id>
 ### Running without Docker
 
 Each service is a normal Go binary if you'd rather run them directly (useful for
-iterating on one service without rebuilding an image):
+iterating on one service without rebuilding an image). Run each command from the
+repository root, one per terminal:
 
 ```sh
 redis-server --port 6379
-cd queue  && go run ./cmd/main.go -mode api -port 8080
-cd engine && go run ./cmd --agents agents --port 8000 --queue http://localhost:8080 --redis redis://localhost:6379
-cd worker && go run ./cmd --queue http://localhost:8080 --engine http://localhost:8000
+(cd queue  && go run ./cmd/main.go -mode api -port 8080)
+(cd engine && go run ./cmd --agents agents --port 8000 --queue http://localhost:8080 --redis redis://localhost:6379)
+(cd worker && go run ./cmd --queue http://localhost:8080 --engine http://localhost:8000)
 ```
 
 ## Tests
