@@ -8,11 +8,13 @@ import (
 	"strings"
 )
 
-// LoadAgentsFromDir reads every *.json file directly under dir,
-// unmarshals each into an AgentDefinition, and returns them as a
-// MapAgentRegistry keyed by filename (without the .json extension) —
-// e.g. agents/research_agent.json is registered as "research_agent".
-// Used to populate agent_call's AgentRegistry once at startup.
+// LoadAgentsFromDir reads every *.json file directly under dir, except
+// dotfiles and *.schema.json (meta files describing the agent format
+// itself, like agent.schema.json, not an agent to register), unmarshals
+// each into an AgentDefinition, and returns them as a MapAgentRegistry
+// keyed by filename (without the .json extension) — e.g.
+// agents/research_agent.json is registered as "research_agent". Used to
+// populate agent_call's AgentRegistry once at startup.
 func LoadAgentsFromDir(dir string) (MapAgentRegistry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -21,11 +23,15 @@ func LoadAgentsFromDir(dir string) (MapAgentRegistry, error) {
 
 	registry := MapAgentRegistry{}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".schema.json") {
 			continue
 		}
 
-		path := filepath.Join(dir, entry.Name())
+		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read agent file %s: %w", path, err)
@@ -36,8 +42,7 @@ func LoadAgentsFromDir(dir string) (MapAgentRegistry, error) {
 			return nil, fmt.Errorf("failed to parse agent file %s: %w", path, err)
 		}
 
-		name := strings.TrimSuffix(entry.Name(), ".json")
-		registry[name] = def
+		registry[strings.TrimSuffix(name, ".json")] = def
 	}
 
 	return registry, nil
