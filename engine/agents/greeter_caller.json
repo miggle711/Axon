@@ -1,4 +1,5 @@
 {
+  "$schema": "./agent.schema.json",
   "name": "greeter_caller",
   "description": "Top-level example agent: calls the greeter sub-agent via agent_call, then echoes its result. Demonstrates a real, on-disk agent_call chain end-to-end.",
   "steps": [

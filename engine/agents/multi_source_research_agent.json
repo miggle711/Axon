@@ -1,4 +1,5 @@
 {
+  "$schema": "./agent.schema.json",
   "name": "multi_source_research_agent",
   "description": "Runs two independent Tavily searches on the same question from different angles (general background, and recent developments), then synthesizes a single answer from both. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker. Exercises a genuine fan-in dependency (one step depending on two others) that no other agent in this repo has needed yet.",
   "output_step": "answer",

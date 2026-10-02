@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Axon agent definition",
+  "description": "An agent is a DAG of steps the engine drives to completion. See the README's \"Step types\" section and the other files in this directory for real, working examples of every step type. This schema gives editor autocomplete/validation while hand-authoring an agent - it does not replace validateAgentDefinition, which is the actual source of truth at runtime (and catches things a schema can't, like dangling step references or dependency cycles).",
+  "type": "object",
+  "required": ["name", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "A reference back to this file, so editors (VS Code and others) apply it for autocomplete/validation. Not read by the engine."
+    },
+    "name": {
+      "type": "string",
+      "description": "The agent's name, used to reference it in POST /runs and axon run."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this agent does."
+    },
+    "output_step": {
+      "type": "string",
+      "description": "The step whose result becomes this agent's output when it's called as a sub-agent via an agent_call step. Only required for agents used that way."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/step" }
+    }
+  },
+  "definitions": {
+    "step": {
+      "type": "object",
+      "required": ["id", "type", "depends_on"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique within this agent. Referenced by depends_on, on_true/on_false, options, and {{step_id.output}}/{{step_id.iteration}} template placeholders."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["tool_call", "llm_call", "conditional", "agent_call", "supervisor"]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Step IDs that must complete before this step becomes runnable. Empty array if this step has no dependencies."
+        },
+        "tool": {
+          "type": "string",
+          "description": "Required for tool_call. The registered tool name (echo, tavily_search)."
+        },
+        "input_template": {
+          "type": "string",
+          "description": "The tool's input, for tool_call. Supports {{user_input}}, {{step_id.output}}, {{step_id.iteration}}."
+        },
+        "prompt_template": {
+          "type": "string",
+          "description": "Required for llm_call and supervisor. The prompt sent to Groq. Supports {{user_input}}, {{step_id.output}}, {{step_id.iteration}}."
+        },
+        "agent": {
+          "type": "string",
+          "description": "Required for agent_call. The name of the sub-agent to spawn as a child run."
+        },
+        "condition": {
+          "type": "string",
+          "description": "Required for conditional. e.g. \"{{step_id.output}} == success\" or \"{{step_id.output}} contains foo\". Supports ==, !=, and contains."
+        },
+        "on_true": {
+          "type": "string",
+          "description": "For conditional. Step ID to run if condition is true. Empty/omitted is valid (that branch intentionally does nothing)."
+        },
+        "on_false": {
+          "type": "string",
+          "description": "For conditional. Step ID to run if condition is false. Empty/omitted is valid (that branch intentionally does nothing)."
+        },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "Required for supervisor. Step IDs the model can choose to run next; it loops until it answers \"done\" or the iteration cap is hit."
+        },
+        "first_iteration_step": {
+          "type": "string",
+          "description": "Optional, for supervisor only. Names one of options to run automatically on this supervisor's first iteration, skipping the LLM decision call for that one iteration. Must be one of options."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "tool_call" } } },
+          "then": { "required": ["tool"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "llm_call" } } },
+          "then": { "required": ["prompt_template"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "supervisor" } } },
+          "then": { "required": ["prompt_template", "options"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "conditional" } } },
+          "then": { "required": ["condition"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "agent_call" } } },
+          "then": { "required": ["agent"] }
+        }
+      ]
+    }
+  }
+}

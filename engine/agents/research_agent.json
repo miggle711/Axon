@@ -1,4 +1,5 @@
 {
+  "$schema": "./agent.schema.json",
   "name": "research_agent",
   "description": "Has an LLM supervisor judge whether web search results (via Tavily) are sufficient to answer a question, re-searching up to the iteration cap if not, then synthesizes a final answer. Requires TAVILY_API_KEY and GROQ_API_KEY to be set on the worker. Built for #39: exercises supervisor against real, unpredictable LLM output rather than simulated test payloads. judge has no depends_on and no prior search to judge on iteration 0, so first_iteration_step (#56) forces its first move to be search structurally, instead of relying on prompt text to make the model say 'search' first. This isn't just a nicety: handleSupervisorDecision requires at least one option to have run before 'done' is valid, since judge's own result comes from the last option's output, and a live Groq call once confirmed the model will say 'done' immediately given the chance, which the engine then correctly rejects with no usable result to fall back on.",
   "output_step": "answer",

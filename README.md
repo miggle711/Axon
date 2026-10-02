@@ -87,6 +87,12 @@ Every agent JSON file dropped into `engine/agents/` is loaded and validated at
 engine startup; a malformed one (dangling step reference, missing required field,
 unknown step type) is rejected with every problem it found, not just the first.
 
+`engine/agents/agent.schema.json` is a JSON Schema for this format - most editors
+(VS Code included) pick it up automatically via the `$schema` field already set in
+every committed agent file, giving autocomplete and inline errors while you write
+one. It's a hand-authoring aid, not the source of truth: `validateAgentDefinition`
+at engine startup is what actually enforces the rules.
+
 ## Running locally
 
 The easiest way to run all four parts together is docker-compose.

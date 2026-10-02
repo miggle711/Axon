@@ -1,4 +1,5 @@
 {
+  "$schema": "./agent.schema.json",
   "name": "greeter",
   "description": "Sub-agent example for agent_call: echoes a greeting back using the echo tool.",
   "output_step": "greet",

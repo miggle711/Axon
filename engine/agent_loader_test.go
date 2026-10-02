@@ -43,6 +43,36 @@ func TestLoadAgentsFromDir(t *testing.T) {
 	}
 }
 
+// TestLoadAgentsFromDir_SkipsSchemaFile covers a real bug: adding
+// agent.schema.json (a JSON Schema describing the agent format itself,
+// for editor autocomplete/validation - see #54) to engine/agents/
+// caused LoadAgentsFromDir to register it as a broken, empty agent
+// (no name, no steps), since it matched *.json like everything else.
+// Confirmed live: POST /runs with agent_name "agent.schema" created a
+// real run with Steps: null before this fix.
+func TestLoadAgentsFromDir_SkipsSchemaFile(t *testing.T) {
+	dir := t.TempDir()
+
+	writeAgent(t, dir, "agent_one.json", `{"name": "agent_one", "steps": []}`)
+	writeAgent(t, dir, "agent.schema.json", `{"title": "not an agent, a json schema"}`)
+	writeAgent(t, dir, ".hidden.json", `{"also": "not an agent"}`)
+
+	registry, err := LoadAgentsFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadAgentsFromDir failed: %v", err)
+	}
+
+	if len(registry) != 1 {
+		t.Fatalf("expected only agent_one to be loaded, got %d agents: %v", len(registry), registry)
+	}
+	if _, ok := registry.Get("agent_one"); !ok {
+		t.Error("expected agent_one to still be registered")
+	}
+	if _, ok := registry.Get("agent.schema"); ok {
+		t.Error("expected agent.schema.json to be skipped, not registered as a broken agent")
+	}
+}
+
 func TestLoadAgentsFromDir_MalformedFile(t *testing.T) {
 	dir := t.TempDir()
 	writeAgent(t, dir, "broken.json", `{not valid json`)
