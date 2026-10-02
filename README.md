@@ -1,5 +1,11 @@
 # Axon
 
+[![CLI Tests](https://github.com/miggle711/Axon/actions/workflows/cli-tests.yml/badge.svg)](https://github.com/miggle711/Axon/actions/workflows/cli-tests.yml)
+[![Engine & Worker Tests](https://github.com/miggle711/Axon/actions/workflows/engine-worker-tests.yml/badge.svg)](https://github.com/miggle711/Axon/actions/workflows/engine-worker-tests.yml)
+[![Queue Tests](https://github.com/miggle711/Axon/actions/workflows/queue-tests.yml/badge.svg)](https://github.com/miggle711/Axon/actions/workflows/queue-tests.yml)
+[![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)](https://go.dev/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 A distributed AI agent orchestration framework with a built-from-scratch task queue.
 
 Agents are defined as JSON, not code: a DAG of steps (tool calls, LLM calls,
