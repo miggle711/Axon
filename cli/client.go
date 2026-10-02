@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	engine "axon-engine"
@@ -91,6 +93,52 @@ func (c *Client) GetRun(ctx context.Context, runID string) (*engine.Run, error) 
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	return &run, nil
+}
+
+// ListRuns fetches recent top-level runs, optionally filtered by
+// agentName/status (either "" for unfiltered), newest first (#53).
+func (c *Client) ListRuns(ctx context.Context, agentName, status string, limit int) ([]*engine.Run, error) {
+	u, err := url.Parse(c.baseURL + "/runs")
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+	q := u.Query()
+	if agentName != "" {
+		q.Set("agent_name", agentName)
+	}
+	if status != "" {
+		q.Set("status", status)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, apiError(resp.StatusCode, body)
+	}
+
+	var runs []*engine.Run
+	if err := json.Unmarshal(body, &runs); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return runs, nil
 }
 
 func apiError(statusCode int, body []byte) error {

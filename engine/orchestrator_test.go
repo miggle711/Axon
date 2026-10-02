@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync"
 	"testing"
 )
@@ -57,6 +58,63 @@ func (s *fakeRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 		return nil, err
 	}
 	return &run, nil
+}
+
+// ListRuns mirrors RedisRunStore.ListRuns' semantics (top-level runs
+// only, newest first, filtered and paginated the same way) without
+// needing a real Redis sorted-set index, since correctness here is
+// about the filter/sort/paginate logic itself, not the storage engine.
+func (s *fakeRunStore) ListRuns(ctx context.Context, opts ListRunsOptions) ([]*Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var matched []*Run
+	for _, run := range s.runs {
+		if run.ParentRunID != "" {
+			continue
+		}
+		if opts.AgentName != "" && run.AgentName != opts.AgentName {
+			continue
+		}
+		if opts.Status != "" && run.Status != opts.Status {
+			continue
+		}
+		matched = append(matched, run)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].CreatedAt.After(matched[j].CreatedAt)
+	})
+
+	limit := opts.Limit
+	if limit <= 0 || limit > maxListRunsLimit {
+		limit = defaultListRunsLimit
+	}
+	start := opts.Offset
+	if start < 0 {
+		start = 0
+	}
+	if start > len(matched) {
+		start = len(matched)
+	}
+	end := start + limit
+	if end > len(matched) {
+		end = len(matched)
+	}
+
+	result := make([]*Run, 0, end-start)
+	for _, run := range matched[start:end] {
+		data, err := json.Marshal(run)
+		if err != nil {
+			return nil, err
+		}
+		var copyRun Run
+		if err := json.Unmarshal(data, &copyRun); err != nil {
+			return nil, err
+		}
+		result = append(result, &copyRun)
+	}
+	return result, nil
 }
 
 // newFakeQueueServer stands in for the queue service's POST /jobs
