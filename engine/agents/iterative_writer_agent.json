@@ -1,4 +1,5 @@
 {
+  "$schema": "./agent.schema.json",
   "name": "iterative_writer_agent",
   "description": "Demonstrates first_iteration_step (#56): editor has no depends_on and no prior draft to judge, so its first move is structurally forced to be draft rather than an LLM decision with nothing real to decide. From the second iteration on, editor makes a real LLM judgment on the latest draft, revising up to the iteration cap or stopping once satisfied. Requires GROQ_API_KEY to be set on the worker.",
   "output_step": "answer",
