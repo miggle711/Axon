@@ -5,8 +5,23 @@
 
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "gomod"
+    directory: "/engine"
     schedule:
       interval: "weekly"
-    
+  - package-ecosystem: "gomod"
+    directory: "/queue"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/worker"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/cli"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
