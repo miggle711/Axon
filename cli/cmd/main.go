@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	cli "axon-cli"
@@ -41,6 +42,8 @@ func main() {
 		statusCommand(ctx, os.Args[2:])
 	case "list":
 		listCommand(ctx, os.Args[2:])
+	case "init":
+		initCommand(os.Args[2:])
 	default:
 		printUsage()
 		os.Exit(1)
@@ -157,6 +160,44 @@ func listCommand(ctx context.Context, args []string) {
 	fmt.Print(cli.FormatRunList(runs))
 }
 
+func initCommand(args []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	scaffoldType := fs.String("type", "", "Scaffold type (one of "+strings.Join(cli.ScaffoldTypes, ", ")+")")
+	name := fs.String("name", "", "Agent name, also used as the default output filename")
+	out := fs.String("out", "", "Output file path (default: <name>.json in the current directory)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: axon init --type TYPE --name NAME [--out PATH]")
+		fmt.Fprintln(os.Stderr, "\nWrites a starter agent definition to a file. Review it, edit the parts")
+		fmt.Fprintln(os.Stderr, "that are still placeholders, then copy it into engine/agents/ once you're")
+		fmt.Fprintln(os.Stderr, "ready to load it. See README.md's \"Step types\" section for what each")
+		fmt.Fprintln(os.Stderr, "scaffold actually builds.")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if *scaffoldType == "" || *name == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	data, err := cli.Scaffold(*scaffoldType, *name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	path := *out
+	if path == "" {
+		path = *name + ".json"
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to write %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Wrote %s\n", path)
+}
+
 // clearScreen wipes the terminal between --watch polls, the same way
 // tools like watch(1)/top do, so each poll reads as the current full
 // state rather than an ever-scrolling list of full reprints.
@@ -172,6 +213,7 @@ Usage:
   axon status [--engine URL] [--watch] <run_id>        Show a run's current status and result
   axon list [--engine URL] [--agent NAME] [--status STATUS] [--limit N]
                                                         List recent runs
+  axon init --type TYPE --name NAME [--out PATH]       Write a starter agent definition
 
 Environment:
   AXON_ENGINE_URL   Engine API base URL (default: http://localhost:8000), overridden by --engine`)
