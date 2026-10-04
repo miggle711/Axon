@@ -1,0 +1,6 @@
+{
+  "name": "pandoc_to_markdown",
+  "command": "pandoc",
+  "args": ["-f", "html", "-t", "markdown"],
+  "timeout_seconds": 30
+}

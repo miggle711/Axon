@@ -25,6 +25,7 @@ func main() {
 	queueURL := flag.String("queue", "http://localhost:8080", "Queue service URL")
 	engineURL := flag.String("engine", "http://localhost:8000", "Engine service URL")
 	groqModel := flag.String("model", "openai/gpt-oss-120b", "Groq model to use for llm_call steps")
+	subprocessToolsDir := flag.String("subprocess-tools", "subprocess_tools", "Directory of subprocess tool config files (see #42)")
 	flag.Parse()
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
@@ -37,10 +38,13 @@ func main() {
 	} else {
 		logger.Warn("TAVILY_API_KEY not set: tavily_search tool_call steps will be nacked until it is provided")
 	}
-	if pandocTool, err := tools.NewPandocToMarkdown(); err == nil {
-		toolRegistry["pandoc_to_markdown"] = pandocTool
-	} else {
-		logger.Warn("pandoc not found: pandoc_to_markdown tool_call steps will be nacked until it is installed", "error", err)
+	subprocessTools, err := tools.LoadSubprocessToolsFromDir(*subprocessToolsDir, logger)
+	if err != nil {
+		logger.Error("failed to load subprocess tool configs", "dir", *subprocessToolsDir, "error", err)
+		os.Exit(1)
+	}
+	for name, tool := range subprocessTools {
+		toolRegistry[name] = tool
 	}
 
 	runners := map[string]StepRunner{
