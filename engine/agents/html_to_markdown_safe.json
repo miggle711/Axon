@@ -1,0 +1,43 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "html_to_markdown_safe",
+  "description": "Converts HTML to Markdown via pandoc_to_markdown (#75), falling back to a clear message instead of silently returning empty output if pandoc produced nothing. Built with engine/agentbuilder (#56) as a real example of the typed builder workflow, not a hand-rebuilt copy of an existing agent. Requires pandoc to be installed on the worker's PATH.",
+  "steps": [
+    {
+      "id": "check_empty",
+      "type": "conditional",
+      "depends_on": [
+        "convert"
+      ],
+      "condition": "{{convert.output}} == ",
+      "on_true": "fallback",
+      "on_false": "success"
+    },
+    {
+      "id": "convert",
+      "type": "tool_call",
+      "depends_on": [],
+      "tool": "pandoc_to_markdown",
+      "input_template": "{{user_input}}"
+    },
+    {
+      "id": "fallback",
+      "type": "tool_call",
+      "depends_on": [
+        "check_empty"
+      ],
+      "tool": "echo",
+      "input_template": "(pandoc returned nothing for this input)"
+    },
+    {
+      "id": "success",
+      "type": "tool_call",
+      "depends_on": [
+        "check_empty"
+      ],
+      "tool": "echo",
+      "input_template": "{{convert.output}}"
+    }
+  ],
+  "output_step": "success"
+}
