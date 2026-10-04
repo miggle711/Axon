@@ -44,6 +44,10 @@ func main() {
 		os.Exit(1)
 	}
 	for name, tool := range subprocessTools {
+		if _, exists := toolRegistry[name]; exists {
+			logger.Error("subprocess tool name collides with an existing tool, refusing to start", "name", name)
+			os.Exit(1)
+		}
 		toolRegistry[name] = tool
 	}
 

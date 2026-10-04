@@ -21,10 +21,11 @@ import (
 // and skipped, exactly like pandoc_to_markdown's own startup check and
 // tavily_search's API-key check - a missing dependency shouldn't stop
 // the whole worker from starting, only the one tool that needs it.
-// A malformed config file (bad JSON, missing name/command) is a hard
-// error, same as LoadAgentsFromDir treats a malformed agent file -
-// that's an authoring mistake worth failing loudly on, not silently
-// skipping.
+// A malformed config file (bad JSON, missing name/command) or two
+// config files claiming the same name is a hard error, same as
+// LoadAgentsFromDir treats a malformed/duplicate agent file - that's
+// an authoring mistake worth failing loudly on, not silently
+// overwriting one tool with another or skipping.
 func LoadSubprocessToolsFromDir(dir string, logger *slog.Logger) (map[string]Tool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -53,6 +54,10 @@ func LoadSubprocessToolsFromDir(dir string, logger *slog.Logger) (map[string]Too
 		}
 		if tool.Command == "" {
 			return nil, fmt.Errorf("tool config file %s: missing required field \"command\"", path)
+		}
+
+		if _, exists := registry[tool.Name]; exists {
+			return nil, fmt.Errorf("tool config file %s: name %q is already registered by another config file in %s", path, tool.Name, dir)
 		}
 
 		if err := tool.resolve(); err != nil {

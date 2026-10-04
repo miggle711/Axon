@@ -83,6 +83,21 @@ func TestLoadSubprocessToolsFromDir_MissingDir(t *testing.T) {
 	}
 }
 
+// TestLoadSubprocessToolsFromDir_DuplicateName covers a real review
+// finding: two config files both naming the same tool used to
+// silently let the second one clobber the first with no warning at
+// all. Now a hard error, same as LoadAgentsFromDir already treats a
+// duplicate agent ID.
+func TestLoadSubprocessToolsFromDir_DuplicateName(t *testing.T) {
+	dir := t.TempDir()
+	writeToolConfig(t, dir, "a.json", `{"name": "dup_tool", "command": "cat", "args": []}`)
+	writeToolConfig(t, dir, "b.json", `{"name": "dup_tool", "command": "cat", "args": ["-n"]}`)
+
+	if _, err := LoadSubprocessToolsFromDir(dir, discardLogger); err == nil {
+		t.Fatal("expected an error for two config files claiming the same tool name, got none")
+	}
+}
+
 // TestLoadSubprocessToolsFromDir_RealPandocConfig covers the actual
 // committed worker/subprocess_tools/pandoc_to_markdown.json, proving
 // the real config file this repo ships (not just a synthetic test
