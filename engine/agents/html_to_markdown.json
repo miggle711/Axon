@@ -1,0 +1,15 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "html_to_markdown",
+  "description": "First real subprocess tool agent (#42): converts the input HTML to Markdown via pandoc_to_markdown, a tool that shells out to a real pandoc binary instead of calling an HTTP API like tavily_search does. Requires pandoc to be installed on the worker's PATH.",
+  "output_step": "convert",
+  "steps": [
+    {
+      "id": "convert",
+      "type": "tool_call",
+      "tool": "pandoc_to_markdown",
+      "input_template": "{{user_input}}",
+      "depends_on": []
+    }
+  ]
+}
