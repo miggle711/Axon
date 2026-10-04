@@ -93,6 +93,30 @@ every committed agent file, giving autocomplete and inline errors while you writ
 one. It's a hand-authoring aid, not the source of truth: `validateAgentDefinition`
 at engine startup is what actually enforces the rules.
 
+For a more complex agent, `engine/agentbuilder` is a typed Go API that generates
+this same JSON instead of hand-writing it. A step is a `*Step` value referenced by
+variable, so a typo'd reference (a dependency, an option, a conditional branch)
+becomes a Go compile error instead of a silently wrong string that only surfaces
+once the engine loads the file:
+
+```go
+convert := ab.Tool("convert", "pandoc_to_markdown", "{{user_input}}")
+fallback := ab.Tool("fallback", "echo", "(pandoc returned nothing for this input)")
+success := ab.Tool("success", "echo", ab.Output(convert))
+checkEmpty := ab.Conditional("check_empty", ab.Output(convert)+" == ", fallback, success, convert)
+
+agent := ab.New("html_to_markdown_safe", checkEmpty, convert, fallback, success).
+    WithOutputStep(success)
+```
+
+`ab.Conditional` also wires `fallback`/`success` to depend on `check_empty`
+automatically. In hand-written JSON that reverse edge has to be added separately
+on each target step, and it's easy to forget one.
+
+The engine itself never imports this package; you write a small Go program, run
+it once, and commit the JSON it prints, same as any other agent file. See
+`engine/agentbuilder/examples/html_to_markdown_safe` for the full, real example.
+
 ## Running locally
 
 The easiest way to run all four parts together is docker-compose.
