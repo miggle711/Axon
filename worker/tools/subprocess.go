@@ -8,6 +8,61 @@ import (
 	"time"
 )
 
+// maxSubprocessOutputBytes caps how much stdout/stderr a single call
+// captures. Without a limit, a misbehaving (or, per #42's documented
+// trust boundary, intentionally hostile) command could write arbitrary
+// amounts of data and exhaust worker memory - the timeout alone
+// doesn't protect against this, since a command can write quickly and
+// still finish well within it.
+const maxSubprocessOutputBytes = 10 * 1024 * 1024 // 10 MiB
+
+// limitedBuffer stops accepting writes once more than limit bytes have
+// been written to it, instead of growing unbounded, and calls
+// onExceeded the first time that happens.
+//
+// Deliberately holds its buffer as an unexported field rather than
+// embedding bytes.Buffer: os/exec special-cases an exec.Cmd.Stdout/
+// Stderr that is (or embeds) a *bytes.Buffer, writing into its
+// internal slice directly via an internal fast path that completely
+// bypasses any overridden Write method - confirmed live, embedding let
+// os/exec write past the limit entirely uncapped, Write was never even
+// called. Composition instead of embedding closes that bypass, since
+// the concrete type os/exec sees is no longer a *bytes.Buffer at all.
+//
+// Returning an error from Write alone also isn't enough to actually
+// stop a runaway command: os/exec copies a pipe into Stdout/Stderr on
+// a background goroutine, and a Write error just makes that goroutine
+// stop reading - it doesn't touch the process itself. A command that
+// keeps writing to a pipe nobody's draining anymore just blocks on its
+// own write() once the OS pipe buffer fills, so the call would hang
+// until the overall timeout anyway rather than actually failing fast
+// on the output limit. onExceeded is used to kill the process
+// directly instead (see Run), reusing the same WaitDelay-protected
+// shutdown path the timeout already relies on.
+type limitedBuffer struct {
+	buf        bytes.Buffer
+	limit      int
+	onExceeded func()
+	exceeded   bool
+	totalSeen  int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.totalSeen += len(p)
+	if b.totalSeen > b.limit {
+		if !b.exceeded && b.onExceeded != nil {
+			b.onExceeded()
+		}
+		b.exceeded = true
+		return 0, fmt.Errorf("output exceeded %d byte limit", b.limit)
+	}
+	return b.buf.Write(p)
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
+}
+
 // SubprocessTool runs a fixed external command, feeding Run's input to
 // its stdin and returning its stdout as output - the generic version
 // of #74's pandoc_to_markdown, config-driven instead of hard-coded in
@@ -63,12 +118,24 @@ func (t *SubprocessTool) Run(ctx context.Context, input string) (string, error) 
 
 	cmd := exec.CommandContext(ctx, t.binaryPath, t.Args...)
 	cmd.Stdin = bytes.NewReader([]byte(input))
+	// Without WaitDelay, Wait (called inside Run) can block past the
+	// context's cancellation waiting for stdout/stderr pipes to close -
+	// a command that forks its own children (unlike pandoc, but a
+	// future config's command might) can keep those pipes open well
+	// after the parent itself was killed, silently defeating the
+	// timeout above. WaitDelay forces the pipes closed shortly after
+	// cancellation regardless.
+	cmd.WaitDelay = 5 * time.Second
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &limitedBuffer{limit: maxSubprocessOutputBytes, onExceeded: cancel}
+	stderr := &limitedBuffer{limit: maxSubprocessOutputBytes, onExceeded: cancel}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
+		if stdout.exceeded || stderr.exceeded {
+			return "", fmt.Errorf("%s: output exceeded %d byte limit", t.Name, maxSubprocessOutputBytes)
+		}
 		return "", fmt.Errorf("%s: %w: %s", t.Name, err, stderr.String())
 	}
 
