@@ -37,6 +37,11 @@ func main() {
 	} else {
 		logger.Warn("TAVILY_API_KEY not set: tavily_search tool_call steps will be nacked until it is provided")
 	}
+	if pandocTool, err := tools.NewPandocToMarkdown(); err == nil {
+		toolRegistry["pandoc_to_markdown"] = pandocTool
+	} else {
+		logger.Warn("pandoc not found: pandoc_to_markdown tool_call steps will be nacked until it is installed", "error", err)
+	}
 
 	runners := map[string]StepRunner{
 		worker.JobTypeToolCall: newToolCallRunner(toolRegistry),
