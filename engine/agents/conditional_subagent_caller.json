@@ -1,0 +1,24 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "conditional_subagent_caller",
+  "description": "Parent half of #56's output_step-under-branching test: calls conditional_subagent.json and echoes exactly what it got back.",
+  "steps": [
+    {
+      "id": "call_subagent",
+      "type": "agent_call",
+      "depends_on": [],
+      "input_template": "{{user_input}}",
+      "agent": "conditional_subagent"
+    },
+    {
+      "id": "after_call",
+      "type": "tool_call",
+      "depends_on": [
+        "call_subagent"
+      ],
+      "tool": "echo",
+      "input_template": "sub-agent returned: {{call_subagent.output}}"
+    }
+  ],
+  "output_step": "after_call"
+}

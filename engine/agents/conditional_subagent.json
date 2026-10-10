@@ -1,0 +1,43 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "conditional_subagent",
+  "description": "Sub-agent for #56's output_step-under-branching test: output_step names check (the conditional) itself, not one of its branches. step_1 always outputs \"success\", so check always routes to on_true_step - confirming live whether a parent calling this gets back on_true_step's real output, or the literal string \"on_true_step\" (check's own StepResults entry, per engine/orchestrator.go, is the winning branch's step ID, not its output).",
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "tool_call",
+      "depends_on": [],
+      "tool": "echo",
+      "input_template": "success"
+    },
+    {
+      "id": "check",
+      "type": "conditional",
+      "depends_on": [
+        "step_1"
+      ],
+      "condition": "{{step_1.output}} == success",
+      "on_true": "on_true_step",
+      "on_false": "on_false_step"
+    },
+    {
+      "id": "on_true_step",
+      "type": "tool_call",
+      "depends_on": [
+        "check"
+      ],
+      "tool": "echo",
+      "input_template": "this is the real on_true_step output"
+    },
+    {
+      "id": "on_false_step",
+      "type": "tool_call",
+      "depends_on": [
+        "check"
+      ],
+      "tool": "echo",
+      "input_template": "this is the real on_false_step output"
+    }
+  ],
+  "output_step": "check"
+}
