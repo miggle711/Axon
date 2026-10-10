@@ -1,0 +1,37 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "supervisor_two_options",
+  "description": "Tests a supervisor choosing between two genuinely distinct options (search, calculate) rather than looping on a single one. judge forces its first move to search via first_iteration_step, then makes a real LLM decision among three outcomes (search, calculate, done) on later iterations. Confirms the decision-matching logic in processSupervisorDecision correctly dispatches to whichever of several options the LLM actually names. Requires GROQ_API_KEY on the worker.",
+  "steps": [
+    {
+      "id": "judge",
+      "type": "supervisor",
+      "depends_on": [],
+      "prompt_template": "You are deciding what to do next to answer the question below.\n\nQuestion: {{user_input}}\n\nMost recent search result:\n{{search.output}}\n\nMost recent calculation result:\n{{calculate.output}}\n\nIf you need to look something up, respond with exactly: search\nIf you need to compute something, respond with exactly: calculate\nIf you have enough to answer the question, respond with exactly: done\n\nRespond with only one of those three words, nothing else.",
+      "options": [
+        "search",
+        "calculate"
+      ],
+      "first_iteration_step": "search"
+    },
+    {
+      "id": "search",
+      "type": "tool_call",
+      "depends_on": [
+        "judge"
+      ],
+      "tool": "echo",
+      "input_template": "search result for: {{user_input}}"
+    },
+    {
+      "id": "calculate",
+      "type": "tool_call",
+      "depends_on": [
+        "judge"
+      ],
+      "tool": "echo",
+      "input_template": "calculation result for: {{user_input}}"
+    }
+  ],
+  "output_step": "judge"
+}
