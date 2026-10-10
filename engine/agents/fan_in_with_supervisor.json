@@ -1,0 +1,42 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "fan_in_with_supervisor",
+  "description": "Tests a fan-in where one parallel branch is a supervisor loop rather than a single step: branch_a is a plain tool_call, the other branch is editor's supervisor loop over draft, and combine waits on both. Confirms combine only runs once editor has actually settled (emitted done), not after editor's first iteration. Requires GROQ_API_KEY on the worker.",
+  "steps": [
+    {
+      "id": "branch_a",
+      "type": "tool_call",
+      "depends_on": [],
+      "tool": "echo",
+      "input_template": "{{user_input}} (branch a)"
+    },
+    {
+      "id": "draft",
+      "type": "llm_call",
+      "depends_on": [
+        "editor"
+      ],
+      "prompt_template": "Write a short, clear paragraph answering the question below. If a previous draft is shown, improve on it rather than starting over.\n\nQuestion: {{user_input}}\n\nPrevious draft (if any):\n{{draft.output}}"
+    },
+    {
+      "id": "editor",
+      "type": "supervisor",
+      "depends_on": [],
+      "prompt_template": "You are editing a short paragraph answering a question, judging the latest draft below.\n\nQuestion: {{user_input}}\n\nLatest draft:\n{{draft.output}}\n\nIf the draft answers the question clearly and concisely, respond with exactly: done\nOtherwise, respond with exactly: draft\n\nRespond with only one of those two words, nothing else.",
+      "options": [
+        "draft"
+      ],
+      "first_iteration_step": "draft"
+    },
+    {
+      "id": "combine",
+      "type": "llm_call",
+      "depends_on": [
+        "branch_a",
+        "editor"
+      ],
+      "prompt_template": "Combine these two results.\n\nBranch A:\n{{branch_a.output}}\n\nSupervisor branch (editor's settled draft):\n{{editor.output}}"
+    }
+  ],
+  "output_step": "combine"
+}
