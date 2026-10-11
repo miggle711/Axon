@@ -79,10 +79,17 @@ type SubprocessTool struct {
 	// own PATH lookup) so a missing binary is a clear startup warning,
 	// not a confusing per-call failure.
 	Command string `json:"command"`
-	// Args are passed to Command unchanged on every call. Input is
-	// always delivered via stdin, never substituted into Args - a tool
-	// needing that is a real Go tool, not a SubprocessTool (see above).
+	// Args are passed to Command unchanged on every call, before
+	// anything ArgFromInput adds.
 	Args []string `json:"args"`
+	// ArgFromInput, if set, appends Run's input as one additional
+	// argument after Args instead of piping it to stdin, and leaves
+	// stdin empty. Use this for a tool where the input itself is a
+	// parameter (a jq filter, a search path), not a data payload
+	// (pandoc_to_markdown's HTML body, which stays on stdin). A tool
+	// needing both a parameter and a separate data payload is a real
+	// Go tool, not a SubprocessTool.
+	ArgFromInput bool `json:"arg_from_input,omitempty"`
 	// TimeoutSeconds bounds how long a single call may run before
 	// being killed. Defaults to defaultSubprocessTimeout if zero or
 	// unset, so a hung external process can't block a worker slot
@@ -116,8 +123,15 @@ func (t *SubprocessTool) Run(ctx context.Context, input string) (string, error) 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, t.binaryPath, t.Args...)
-	cmd.Stdin = bytes.NewReader([]byte(input))
+	args := t.Args
+	stdin := []byte(input)
+	if t.ArgFromInput {
+		args = append(append([]string{}, t.Args...), input)
+		stdin = nil
+	}
+
+	cmd := exec.CommandContext(ctx, t.binaryPath, args...)
+	cmd.Stdin = bytes.NewReader(stdin)
 	// Without WaitDelay, Wait (called inside Run) can block past the
 	// context's cancellation waiting for stdout/stderr pipes to close -
 	// a command that forks its own children (unlike pandoc, but a

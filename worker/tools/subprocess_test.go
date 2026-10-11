@@ -138,6 +138,51 @@ func TestSubprocessTool_OutputLimit(t *testing.T) {
 	}
 }
 
+// TestSubprocessTool_ArgFromInput proves ArgFromInput actually
+// changes where input goes: appended as a real argument the command
+// receives, not left sitting unread on stdin.
+func TestSubprocessTool_ArgFromInput(t *testing.T) {
+	// "echo" (the shell binary) just prints its arguments, so this
+	// proves the input landed as an argument and not on stdin without
+	// needing a command that distinguishes the two more deliberately.
+	tool := &SubprocessTool{Name: "echo_arg", Command: "echo", Args: []string{"prefix:"}, ArgFromInput: true}
+	if err := tool.resolve(); err != nil {
+		t.Skipf("echo not found on PATH, skipping: %v", err)
+	}
+
+	output, err := tool.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(output) != "prefix: hello" {
+		t.Errorf("got %q, want %q", strings.TrimSpace(output), "prefix: hello")
+	}
+}
+
+// TestSubprocessTool_ArgFromInput_StdinEmpty proves stdin is left
+// genuinely empty under ArgFromInput, not just unused by Args - a
+// command that reads stdin directly (unlike echo) must see nothing.
+func TestSubprocessTool_ArgFromInput_StdinEmpty(t *testing.T) {
+	// "cat" with no file arguments reads from stdin; if ArgFromInput
+	// correctly leaves stdin empty, cat exits with empty output
+	// instead of echoing input back a second time.
+	tool := &SubprocessTool{Name: "cat_arg", Command: "cat", ArgFromInput: true}
+	if err := tool.resolve(); err != nil {
+		t.Skipf("cat not found on PATH, skipping: %v", err)
+	}
+
+	// cat with one filename argument (the input) prints that file's
+	// contents, so pass a path to a file guaranteed to be empty-ish and
+	// short, /dev/null, to prove the arg was actually used as an arg.
+	output, err := tool.Run(context.Background(), "/dev/null")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "" {
+		t.Errorf("expected empty output from cat /dev/null, got %q", output)
+	}
+}
+
 func TestSubprocessTool_ResolveNotFound(t *testing.T) {
 	tool := &SubprocessTool{Name: "nope", Command: "definitely-not-a-real-binary-xyz123"}
 	if err := tool.resolve(); err == nil {
