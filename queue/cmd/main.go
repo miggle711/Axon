@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	jobpkg "axon-queue"
@@ -40,10 +42,12 @@ func main() {
 	switch *mode {
 	case "api":
 		// Start HTTP API server
-		server := api.NewServer(q)
-		log.Printf("Starting API server on port %s", *port)
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		server := api.NewServer(q, logger)
+		logger.Info("starting API server", "port", *port)
 		if err := server.Start(*port); err != nil {
-			log.Fatalf("Failed to start server: %v", err)
+			logger.Error("failed to start server", "error", err)
+			os.Exit(1)
 		}
 
 	case "demo":
