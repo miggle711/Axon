@@ -20,10 +20,12 @@ func (s *Server) healthHandler(c *gin.Context) {
 func (s *Server) statsHandler(c *gin.Context) {
 	stats, err := s.queue.GetStats(context.Background())
 	if err != nil {
+		s.logger.Error("failed to get stats", "error", err)
 		c.JSON(500, ErrorResponse{Error: "Failed to get stats", Code: 500})
 		return
 	}
 	if stats == nil {
+		s.logger.Error("failed to get stats: queue returned nil stats with no error")
 		c.JSON(500, ErrorResponse{Error: "Failed to get stats", Code: 500})
 		return
 	}
@@ -60,9 +62,11 @@ func (s *Server) enqueueHandler(c *gin.Context) {
 
 	err := s.queue.Enqueue(c.Request.Context(), job)
 	if err != nil {
+		s.logger.Error("failed to enqueue job", "job_id", job.ID, "type", job.Type, "error", err)
 		c.JSON(500, ErrorResponse{Error: "Failed to enqueue job", Code: 500})
 		return
 	}
+	s.logger.Info("job enqueued", "job_id", job.ID, "type", job.Type, "priority", job.Priority)
 
 	c.JSON(201, JobResponse{
 		ID:         job.ID,
@@ -82,6 +86,7 @@ func (s *Server) enqueueHandler(c *gin.Context) {
 func (s *Server) dequeueHandler(c *gin.Context) {
 	job, err := s.queue.Dequeue(c.Request.Context())
 	if err != nil {
+		s.logger.Error("failed to dequeue job", "error", err)
 		c.JSON(500, ErrorResponse{Error: "Failed to dequeue job", Code: 500})
 		return
 	}
@@ -89,6 +94,7 @@ func (s *Server) dequeueHandler(c *gin.Context) {
 		c.Status(204)
 		return
 	}
+	s.logger.Info("job dequeued", "job_id", job.ID, "type", job.Type)
 
 	c.JSON(200, JobResponse{
 		ID:         job.ID,
@@ -109,9 +115,11 @@ func (s *Server) ackHandler(c *gin.Context) {
 	jobID := c.Param("id")
 	err := s.queue.Ack(c.Request.Context(), jobID)
 	if err != nil {
+		s.logger.Error("failed to acknowledge job", "job_id", jobID, "error", err)
 		c.JSON(500, ErrorResponse{Error: "Failed to acknowledge job", Code: 500})
 		return
 	}
+	s.logger.Info("job acknowledged", "job_id", jobID)
 
 	c.JSON(200, gin.H{"message": "Job acknowledged successfully"})
 }
@@ -130,9 +138,11 @@ func (s *Server) failHandler(c *gin.Context) {
 
 	permanentlyFailed, err := s.queue.Nack(c.Request.Context(), jobID, req.Reason)
 	if err != nil {
+		s.logger.Error("failed to mark job as failed", "job_id", jobID, "reason", req.Reason, "error", err)
 		c.JSON(500, ErrorResponse{Error: "Failed to mark job as failed", Code: 500})
 		return
 	}
+	s.logger.Info("job marked as failed", "job_id", jobID, "reason", req.Reason, "permanently_failed", permanentlyFailed)
 
 	c.JSON(200, gin.H{
 		"message":            "Job marked as failed successfully",

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"log/slog"
+
 	"axon-queue/internal/operations"
 	"github.com/gin-gonic/gin"
 )
@@ -9,14 +11,16 @@ import (
 type Server struct {
 	router *gin.Engine
 	queue  *operations.Queue
+	logger *slog.Logger
 }
 
 // NewServer creates a new API server
-func NewServer(queue *operations.Queue) *Server {
+func NewServer(queue *operations.Queue, logger *slog.Logger) *Server {
 	router := gin.Default()
 	server := &Server{
 		router: router,
 		queue:  queue,
+		logger: logger,
 	}
 
 	// Define all routes
