@@ -1359,3 +1359,123 @@ func TestResolveTemplate_IterationPlaceholder(t *testing.T) {
 		}
 	})
 }
+
+// linearChainSteps builds n tool_call steps, each depending on the one
+// before it: step_0 -> step_1 -> ... -> step_(n-1). The simplest shape
+// that still forces OnStepCompleted's resolve loop (#11) to do real
+// work on every completion, without conditionals/supervisors/agent_call
+// complicating what's being measured.
+func linearChainSteps(n int) []StepDefinition {
+	steps := make([]StepDefinition, n)
+	for i := 0; i < n; i++ {
+		deps := []string{}
+		if i > 0 {
+			deps = []string{fmt.Sprintf("step_%d", i-1)}
+		}
+		steps[i] = StepDefinition{
+			ID:            fmt.Sprintf("step_%d", i),
+			Type:          StepTypeToolCall,
+			Tool:          "echo",
+			InputTemplate: "x",
+			DependsOn:     deps,
+		}
+	}
+	return steps
+}
+
+// BenchmarkOnStepCompleted_LinearChain measures the full, real,
+// end-to-end cost of completing all n steps of a linear chain one at
+// a time, the way a real worker webhook sequence would - including
+// RunStore.GetRun/SaveRun on every call. Run with:
+//
+//	go test ./. -bench BenchmarkOnStepCompleted_LinearChain -benchtime=1x
+//
+// This still scales roughly O(n^2) even after #11's resolveSteps fix
+// (see BenchmarkResolveSteps_LinearChain below for that fix measured
+// in isolation), because GetRun/SaveRun each marshal/unmarshal the
+// entire Run blob on every call - a separate O(n)-per-call cost
+// (growing Steps/CompletedSteps/Events) that #11's fix never touched,
+// filed as #81. This benchmark intentionally keeps measuring the real
+// end-to-end path rather than hiding that behind a narrower one, since
+// the whole-blob persistence cost is just as real as the resolve
+// loop's was.
+func BenchmarkOnStepCompleted_LinearChain(b *testing.B) {
+	sizes := []int{50, 100, 200, 400}
+	for _, n := range sizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusCreated)
+					_ = json.NewEncoder(w).Encode(map[string]string{"id": "job"})
+				}))
+
+				store := newFakeRunStore()
+				orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+
+				agent := AgentDefinition{Name: "linear_chain_agent", Steps: linearChainSteps(n)}
+				ctx := context.Background()
+				run, err := orchestrator.CreateRun(ctx, agent, "start")
+				if err != nil {
+					b.Fatalf("CreateRun failed: %v", err)
+				}
+
+				for j := 0; j < n; j++ {
+					stepID := fmt.Sprintf("step_%d", j)
+					if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: stepID, Output: "ok"}); err != nil {
+						b.Fatalf("OnStepCompleted(%s) failed: %v", stepID, err)
+					}
+				}
+
+				server.Close()
+			}
+		})
+	}
+}
+
+// BenchmarkResolveSteps_LinearChain isolates #11's actual fix from the
+// RunStore round trip #81 is about: it drives the same linear chain
+// as BenchmarkOnStepCompleted_LinearChain, but completes each step by
+// mutating run in memory directly and calling resolveSteps itself, the
+// same way finalizeStepCompletion does internally, without ever going
+// through GetRun/SaveRun. This is the benchmark that actually shows
+// #11's dependents-index fix working: total time here should scale
+// close to linearly in n, not quadratically.
+func BenchmarkResolveSteps_LinearChain(b *testing.B) {
+	sizes := []int{50, 100, 200, 400}
+	for _, n := range sizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusCreated)
+					_ = json.NewEncoder(w).Encode(map[string]string{"id": "job"})
+				}))
+
+				orchestrator := NewOrchestrator(newFakeRunStore(), NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+
+				steps := linearChainSteps(n)
+				run := &Run{
+					ID:            "bench-run",
+					AgentName:     "linear_chain_agent",
+					Steps:         steps,
+					StepResults:   make(map[string]string),
+					EnqueuedSteps: make(map[string]string),
+				}
+				ctx := context.Background()
+				if err := orchestrator.resolveSteps(ctx, run); err != nil {
+					b.Fatalf("initial resolveSteps failed: %v", err)
+				}
+
+				for j := 0; j < n; j++ {
+					stepID := fmt.Sprintf("step_%d", j)
+					run.StepResults[stepID] = "ok"
+					run.CompletedSteps = append(run.CompletedSteps, stepID)
+					if err := orchestrator.resolveSteps(ctx, run); err != nil {
+						b.Fatalf("resolveSteps(%s) failed: %v", stepID, err)
+					}
+				}
+
+				server.Close()
+			}
+		})
+	}
+}

@@ -64,25 +64,42 @@ func (orchestrator *Orchestrator) lockFor(runID string) *sync.Mutex {
 // finally settles (its supervisor stops), it must not be eligible for
 // enqueuing again via the normal resolve loop below.
 func canEnqueueStep(step StepDefinition, run *Run) bool {
+	return canEnqueueStepFast(step, run, doneSet(run))
+}
+
+// doneSet builds the "already completed or skipped" membership set
+// canEnqueueStepFast needs, once, rather than every call rescanning
+// run.CompletedSteps/run.SkippedSteps as linear slices (#11) - this is
+// the same cost runIsComplete already pays on every call, computed
+// here once and shared across every canEnqueueStepFast call in one
+// resolveSteps pass instead of once per step.
+func doneSet(run *Run) map[string]bool {
+	done := make(map[string]bool, len(run.CompletedSteps)+len(run.SkippedSteps))
+	for _, id := range run.CompletedSteps {
+		done[id] = true
+	}
+	for _, id := range run.SkippedSteps {
+		done[id] = true
+	}
+	return done
+}
+
+// canEnqueueStepFast is canEnqueueStep taking a precomputed done set
+// instead of rescanning run.CompletedSteps/run.SkippedSteps itself, so
+// a caller resolving many steps in one pass (resolveSteps) can build
+// the set once instead of paying that scan on every step.
+func canEnqueueStepFast(step StepDefinition, run *Run, done map[string]bool) bool {
 	// Check if the step has already been enqueued in the run
 	if _, exists := run.EnqueuedSteps[step.ID]; exists {
 		return false
 	}
 
-	// Check if the step has already completed. Conditionals resolve
-	// inline and are never added to EnqueuedSteps, so without this
-	// check a completed conditional would be re-evaluated forever.
-	for _, completedID := range run.CompletedSteps {
-		if completedID == step.ID {
-			return false
-		}
-	}
-
-	// Check if the step has been skipped (e.g. the losing branch of a conditional)
-	for _, skippedID := range run.SkippedSteps {
-		if skippedID == step.ID {
-			return false
-		}
+	// Check if the step has already completed or been skipped (e.g.
+	// the losing branch of a conditional). Conditionals resolve inline
+	// and are never added to EnqueuedSteps, so without this check a
+	// completed conditional would be re-evaluated forever.
+	if done[step.ID] {
+		return false
 	}
 
 	// Check if all dependencies of the step are completed
@@ -196,6 +213,133 @@ func (orchestrator *Orchestrator) CreateRunByName(ctx context.Context, agentName
 	return orchestrator.createRun(ctx, definition, userInput, "", "")
 }
 
+// buildDependentsIndex maps each step ID to the steps that list it in
+// their own DependsOn, so resolveSteps can go directly from "step X
+// just resolved" to "these are the only steps worth re-checking"
+// instead of rescanning every step in the run (#11).
+func buildDependentsIndex(steps []StepDefinition) map[string][]StepDefinition {
+	index := make(map[string][]StepDefinition)
+	for _, step := range steps {
+		for _, dep := range step.DependsOn {
+			index[dep] = append(index[dep], step)
+		}
+	}
+	return index
+}
+
+// resolveSteps is createRun and finalizeStepCompletion's shared tail:
+// enqueue every step of run that's now ready (or, for conditionals,
+// resolve them inline), and keep going as resolving one step can
+// unblock others.
+//
+// Before #11's fix this repeatedly rescanned the entirety of run.Steps
+// until a full pass made no further progress - for a chain of n
+// steps, each completion could require another full O(n) pass just to
+// notice the one newly-ready step, making a whole run's total work
+// O(n^2). This instead seeds a worklist with every step once, and
+// when a step resolves, pushes only its direct dependents (via a
+// dependents index built once up front) back onto the worklist,
+// turning total work across a run into O(n + e) (n steps, e
+// dependency edges) - each step is only ever re-checked when
+// something it actually depends on changes, not on every pass.
+func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) error {
+	log := orchestrator.logger.With("run_id", run.ID)
+	dependents := buildDependentsIndex(run.Steps)
+	done := doneSet(run)
+
+	worklist := make([]StepDefinition, len(run.Steps))
+	copy(worklist, run.Steps)
+
+	// queue appends step's direct dependents to worklist, so resolving
+	// step is immediately followed by re-checking exactly the steps
+	// that could now be newly ready - not the whole run.
+	queue := func(stepID string) {
+		worklist = append(worklist, dependents[stepID]...)
+	}
+
+	for len(worklist) > 0 {
+		step := worklist[0]
+		worklist = worklist[1:]
+
+		if !canEnqueueStepFast(step, run, done) {
+			continue
+		}
+
+		if step.Type == StepTypeConditional {
+			result, err := evaluateCondition(step.Condition, run)
+			if err != nil {
+				log.Error("failed to evaluate condition", "step_id", step.ID, "error", err)
+				return fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
+			}
+
+			winner, loser := step.OnFalse, step.OnTrue
+			if result {
+				winner, loser = step.OnTrue, step.OnFalse
+			}
+
+			// winner may be "" if that branch intentionally does nothing
+			run.StepResults[step.ID] = winner
+			run.CompletedSteps = append(run.CompletedSteps, step.ID)
+			done[step.ID] = true
+			log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
+			appendEvent(run, "condition_evaluated", step.ID, fmt.Sprintf("result=%v winner=%q loser=%q", result, winner, loser))
+			queue(step.ID)
+
+			if loser != "" {
+				skipped := append([]string{loser}, findTransitiveDependents(loser, run.Steps)...)
+				run.SkippedSteps = append(run.SkippedSteps, skipped...)
+				for _, id := range skipped {
+					done[id] = true
+					queue(id)
+				}
+			}
+
+			continue
+		}
+
+		if step.Type == StepTypeAgentCall {
+			childRun, err := orchestrator.spawnChildRun(ctx, step, run)
+			if err != nil {
+				log.Error("failed to spawn child run", "step_id", step.ID, "error", err)
+				return fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
+			}
+			run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
+			log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
+			appendEvent(run, "child_run_spawned", step.ID, "child_run_id="+childRun.ID)
+			continue
+		}
+
+		if step.Type == StepTypeSupervisor {
+			if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
+				log.Error("failed to enqueue supervisor decision", "step_id", step.ID, "error", err)
+				return err
+			}
+			continue
+		}
+
+		// Enqueue the step and update the run's EnqueuedSteps map
+		jobID, err := orchestrator.queueClient.Enqueue(
+			ctx,
+			step.Type,
+			StepPayload{
+				RunID:     run.ID,
+				StepID:    step.ID,
+				AgentName: run.AgentName,
+				Tool:      step.Tool,
+				Input:     resolveStepInput(step, run),
+			}, 1) // TODO: Default priority set to 1
+		if err != nil {
+			log.Error("failed to enqueue step", "step_id", step.ID, "step_type", step.Type, "error", err)
+			return fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
+		}
+		run.EnqueuedSteps[step.ID] = jobID
+		log.Info("step enqueued", "step_id", step.ID, "step_type", step.Type, "job_id", jobID)
+		appendEvent(run, "step_enqueued", step.ID, "job_id="+jobID)
+	}
+
+	return nil
+}
+
 // createRun is CreateRun's implementation, additionally accepting
 // parentRunID/parentStepID so agent_call can spawn a child run that
 // knows where to propagate its completion back to.
@@ -234,88 +378,9 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 	appendEvent(run, "run_created", "", "")
 
 	// Enqueue the initial steps of the workflow that have no
-	// dependencies (or, for conditionals, resolve them). Repeats
-	// until a full pass makes no further progress, matching
-	// OnStepCompleted's loop.
-	for {
-		changed := false
-		for _, step := range definition.Steps {
-			if !canEnqueueStep(step, run) {
-				continue
-			}
-
-			if step.Type == StepTypeConditional {
-				result, err := evaluateCondition(step.Condition, run)
-				if err != nil {
-					log.Error("failed to evaluate condition", "step_id", step.ID, "error", err)
-					return nil, fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
-				}
-
-				winner, loser := step.OnFalse, step.OnTrue
-				if result {
-					winner, loser = step.OnTrue, step.OnFalse
-				}
-
-				// winner may be "" if that branch intentionally does nothing
-				run.StepResults[step.ID] = winner
-				run.CompletedSteps = append(run.CompletedSteps, step.ID)
-				log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
-				appendEvent(run, "condition_evaluated", step.ID, fmt.Sprintf("result=%v winner=%q loser=%q", result, winner, loser))
-
-				if loser != "" {
-					run.SkippedSteps = append(run.SkippedSteps, loser)
-					run.SkippedSteps = append(run.SkippedSteps, findTransitiveDependents(loser, definition.Steps)...)
-				}
-
-				changed = true
-				continue
-			}
-
-			if step.Type == StepTypeAgentCall {
-				childRun, err := orchestrator.spawnChildRun(ctx, step, run)
-				if err != nil {
-					log.Error("failed to spawn child run", "step_id", step.ID, "error", err)
-					return nil, fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
-				}
-				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
-				log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
-				appendEvent(run, "child_run_spawned", step.ID, "child_run_id="+childRun.ID)
-				changed = true
-				continue
-			}
-
-			if step.Type == StepTypeSupervisor {
-				if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
-					log.Error("failed to enqueue supervisor decision", "step_id", step.ID, "error", err)
-					return nil, err
-				}
-				changed = true
-				continue
-			}
-
-			// Enqueue the step and update the run's EnqueuedSteps map
-			jobID, err := orchestrator.queueClient.Enqueue(
-				ctx,
-				step.Type,
-				StepPayload{
-					RunID:     run.ID,
-					StepID:    step.ID,
-					AgentName: definition.Name,
-					Tool:      step.Tool,
-					Input:     resolveStepInput(step, run),
-				}, 1) // TODO: Default priority set to 1 for initial steps
-			if err != nil {
-				log.Error("failed to enqueue step", "step_id", step.ID, "step_type", step.Type, "error", err)
-				return nil, fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
-			}
-			run.EnqueuedSteps[step.ID] = jobID
-			log.Info("step enqueued", "step_id", step.ID, "step_type", step.Type, "job_id", jobID)
-			appendEvent(run, "step_enqueued", step.ID, "job_id="+jobID)
-			changed = true
-		}
-		if !changed {
-			break
-		}
+	// dependencies (or, for conditionals, resolve them).
+	if err := orchestrator.resolveSteps(ctx, run); err != nil {
+		return nil, err
 	}
 
 	// save the run to the store
@@ -521,88 +586,9 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 	log := orchestrator.logger.With("run_id", run.ID)
 
 	// Check if any dependent steps can now be enqueued or, for
-	// conditionals, resolved. Repeats until a full pass makes no
-	// further progress, since resolving a conditional can unblock a
-	// step earlier in run.Steps within the same pass.
-	for {
-		changed := false
-		for _, step := range run.Steps {
-			if !canEnqueueStep(step, run) {
-				continue
-			}
-
-			if step.Type == StepTypeConditional {
-				result, err := evaluateCondition(step.Condition, run)
-				if err != nil {
-					log.Error("failed to evaluate condition", "step_id", step.ID, "error", err)
-					return fmt.Errorf("failed to evaluate condition for step %s: %v", step.ID, err)
-				}
-
-				winner, loser := step.OnFalse, step.OnTrue
-				if result {
-					winner, loser = step.OnTrue, step.OnFalse
-				}
-
-				// winner may be "" if that branch intentionally does nothing
-				run.StepResults[step.ID] = winner
-				run.CompletedSteps = append(run.CompletedSteps, step.ID)
-				log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
-				appendEvent(run, "condition_evaluated", step.ID, fmt.Sprintf("result=%v winner=%q loser=%q", result, winner, loser))
-
-				if loser != "" {
-					run.SkippedSteps = append(run.SkippedSteps, loser)
-					run.SkippedSteps = append(run.SkippedSteps, findTransitiveDependents(loser, run.Steps)...)
-				}
-
-				changed = true
-				continue
-			}
-
-			if step.Type == StepTypeAgentCall {
-				childRun, err := orchestrator.spawnChildRun(ctx, step, run)
-				if err != nil {
-					log.Error("failed to spawn child run", "step_id", step.ID, "error", err)
-					return fmt.Errorf("failed to spawn child run for step %s: %v", step.ID, err)
-				}
-				run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
-				log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
-				appendEvent(run, "child_run_spawned", step.ID, "child_run_id="+childRun.ID)
-				changed = true
-				continue
-			}
-
-			if step.Type == StepTypeSupervisor {
-				if err := orchestrator.enqueueSupervisorDecision(ctx, run, step); err != nil {
-					log.Error("failed to enqueue supervisor decision", "step_id", step.ID, "error", err)
-					return err
-				}
-				changed = true
-				continue
-			}
-
-			// Enqueue the step and update the run's EnqueuedSteps map
-			jobID, err := orchestrator.queueClient.Enqueue(
-				ctx,
-				step.Type,
-				StepPayload{
-					RunID:     run.ID,
-					StepID:    step.ID,
-					AgentName: run.AgentName,
-					Tool:      step.Tool,
-					Input:     resolveStepInput(step, run),
-				}, 1) // TODO: Default priority set to 1 for subsequent steps
-			if err != nil {
-				log.Error("failed to enqueue step", "step_id", step.ID, "step_type", step.Type, "error", err)
-				return fmt.Errorf("failed to enqueue step %s: %v", step.ID, err)
-			}
-			run.EnqueuedSteps[step.ID] = jobID
-			log.Info("step enqueued", "step_id", step.ID, "step_type", step.Type, "job_id", jobID)
-			appendEvent(run, "step_enqueued", step.ID, "job_id="+jobID)
-			changed = true
-		}
-		if !changed {
-			break
-		}
+	// conditionals, resolved.
+	if err := orchestrator.resolveSteps(ctx, run); err != nil {
+		return err
 	}
 
 	if runIsComplete(run) {
