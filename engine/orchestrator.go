@@ -624,11 +624,32 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 		return orchestrator.OnStepCompleted(ctx, WebhookPayload{
 			RunID:  run.ParentRunID,
 			StepID: run.ParentStepID,
-			Output: run.StepResults[agentDef.OutputStep],
+			Output: resolveOutputStepResult(run, agentDef.OutputStep),
 		})
 	}
 
 	return nil
+}
+
+// resolveOutputStepResult returns the real output an agent's
+// OutputStep should propagate. For most step types this is just
+// run.StepResults[stepID] directly. A conditional is the one
+// exception: its own StepResults entry holds the winning branch's
+// step ID (set where the conditional is resolved), not that branch's
+// actual output, the same way a supervisor's entry holds whichever
+// option last ran rather than the supervisor step's own identity. This
+// follows that indirection, recursing in case the winning branch is
+// itself another conditional.
+func resolveOutputStepResult(run *Run, stepID string) string {
+	step, ok := findStep(run.Steps, stepID)
+	if ok && step.Type == StepTypeConditional {
+		winner := run.StepResults[stepID]
+		if winner == "" {
+			return ""
+		}
+		return resolveOutputStepResult(run, winner)
+	}
+	return run.StepResults[stepID]
 }
 
 // findStep returns the step with the given ID from steps, if present.

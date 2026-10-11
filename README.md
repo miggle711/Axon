@@ -62,8 +62,7 @@ An agent's `steps` array can mix five kinds of step:
 
 Every field can reference earlier results via `{{step_id.output}}`, the original
 input via `{{user_input}}`, or (for a supervisor) its own loop count via
-`{{step_id.iteration}}`. See `engine/agents/` for real, working examples of each,
-from a two-step tool chain up through a supervised research loop.
+`{{step_id.iteration}}`.
 
 A minimal agent (`engine/agents/greeter.json`):
 
@@ -86,6 +85,85 @@ A minimal agent (`engine/agents/greeter.json`):
 Every agent JSON file dropped into `engine/agents/` is loaded and validated at
 engine startup; a malformed one (dangling step reference, missing required field,
 unknown step type) is rejected with every problem it found, not just the first.
+
+### Worked examples
+
+Four real, committed agents, each exercising a step combination that isn't obvious
+from the step type table alone.
+
+**Conditional branching** (`engine/agents/greeter.json` style, as a 4-step version
+used in tests): a step runs, then a `conditional` compares its output and routes to
+one of two steps.
+
+```json
+{
+  "id": "check",
+  "type": "conditional",
+  "condition": "{{step_1.output}} == success",
+  "on_true": "on_true_step",
+  "on_false": "on_false_step",
+  "depends_on": ["step_1"]
+}
+```
+
+The part that's easy to miss: `on_true`/`on_false` only say where to route. The
+target steps each still need `check` in their own `depends_on`, or they'd never
+become runnable. `engine/agentbuilder`'s `Conditional` function adds that second
+edge automatically; writing this by hand means remembering it twice.
+
+**Calling a sub-agent** (`engine/agents/greeter_caller.json`): one agent calling
+another as a child run.
+
+```json
+{
+  "id": "call_greeter",
+  "type": "agent_call",
+  "agent": "greeter",
+  "input_template": "{{user_input}}",
+  "depends_on": []
+}
+```
+
+The sub-agent (`greeter.json` here) needs `output_step` set, naming which of its
+own steps becomes the result `{{call_greeter.output}}` resolves to in the caller.
+An agent with no `output_step` can still run standalone, it just can't be called
+this way.
+
+**A supervisor loop** (`engine/agents/research_agent.json`): an LLM judges whether
+results are good enough, looping until it says so.
+
+```json
+{
+  "id": "judge",
+  "type": "supervisor",
+  "prompt_template": "...",
+  "options": ["search"],
+  "first_iteration_step": "search",
+  "depends_on": []
+}
+```
+
+`judge` has no `depends_on` and nothing to judge yet on its first decision, so
+`first_iteration_step` forces that first move to `search` structurally instead of
+asking the model to get a from-nothing decision right. From the second iteration
+on, `judge` makes a real decision on `search`'s real output, until it answers
+`done` or hits the iteration cap (`engine.MaxSupervisorIterations`).
+
+**Fan-in** (`engine/agents/multi_source_research_agent.json`): two independent
+steps feeding one.
+
+```json
+{
+  "id": "answer",
+  "type": "llm_call",
+  "depends_on": ["background_search", "recent_search"]
+}
+```
+
+`background_search` and `recent_search` both have `depends_on: []`, so neither
+waits on the other. The engine enqueues both the moment a run starts, and they run
+in parallel; nothing has to be declared "parallel" anywhere. `answer` just waits on
+both, the same way any step waits on more than one dependency.
 
 `engine/agents/agent.schema.json` is a JSON Schema for this format - most editors
 (VS Code included) pick it up automatically via the `$schema` field already set in
@@ -148,6 +226,8 @@ or use the CLI:
 cd cli
 go run ./cmd run greeter "world"
 go run ./cmd status <run_id>
+go run ./cmd list
+go run ./cmd init --type conditional --name my_agent
 ```
 
 ### Running without Docker

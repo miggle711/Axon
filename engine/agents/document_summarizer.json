@@ -1,0 +1,23 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "document_summarizer",
+  "description": "Converts an HTML document to markdown via pandoc_to_markdown, then summarizes it with an llm_call. Requires pandoc on the worker's PATH and GROQ_API_KEY for the summarize step.",
+  "steps": [
+    {
+      "id": "convert",
+      "type": "tool_call",
+      "depends_on": [],
+      "tool": "pandoc_to_markdown",
+      "input_template": "{{user_input}}"
+    },
+    {
+      "id": "summarize",
+      "type": "llm_call",
+      "depends_on": [
+        "convert"
+      ],
+      "prompt_template": "Summarize the document below in a few clear sentences.\n\nDocument:\n{{convert.output}}"
+    }
+  ],
+  "output_step": "summarize"
+}

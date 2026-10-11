@@ -1,0 +1,24 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "nested_agent_call_parent",
+  "description": "Middle layer of the two-level agent_call nesting test. Same shape as greeter_caller.json (calls greeter, then echoes its result), but with output_step set so a grandparent can call this as a sub-agent in turn.",
+  "steps": [
+    {
+      "id": "call_greeter",
+      "type": "agent_call",
+      "depends_on": [],
+      "input_template": "{{user_input}}",
+      "agent": "greeter"
+    },
+    {
+      "id": "after_greeting",
+      "type": "tool_call",
+      "depends_on": [
+        "call_greeter"
+      ],
+      "tool": "echo",
+      "input_template": "greeter said: {{call_greeter.output}}"
+    }
+  ],
+  "output_step": "after_greeting"
+}

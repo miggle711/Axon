@@ -1,0 +1,24 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "supervisor_subagent_caller",
+  "description": "Parent half of the supervisor-inside-agent_call combination test: calls supervisor_subagent.json, then echoes its result. Proves a supervisor loop living inside a sub-agent actually works end to end, not just that the shape validates.",
+  "steps": [
+    {
+      "id": "call_subagent",
+      "type": "agent_call",
+      "depends_on": [],
+      "input_template": "{{user_input}}",
+      "agent": "supervisor_subagent"
+    },
+    {
+      "id": "after_call",
+      "type": "tool_call",
+      "depends_on": [
+        "call_subagent"
+      ],
+      "tool": "echo",
+      "input_template": "sub-agent's editor settled on: {{call_subagent.output}}"
+    }
+  ],
+  "output_step": "after_call"
+}

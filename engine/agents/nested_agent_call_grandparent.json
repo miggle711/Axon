@@ -1,0 +1,24 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "nested_agent_call_grandparent",
+  "description": "Top layer of the two-level agent_call nesting test: calls nested_agent_call_parent.json, which itself calls greeter.json. Confirms output_step propagation correctly chains through two levels of agent_call nesting, not just one.",
+  "steps": [
+    {
+      "id": "call_parent",
+      "type": "agent_call",
+      "depends_on": [],
+      "input_template": "{{user_input}}",
+      "agent": "nested_agent_call_parent"
+    },
+    {
+      "id": "after_call",
+      "type": "tool_call",
+      "depends_on": [
+        "call_parent"
+      ],
+      "tool": "echo",
+      "input_template": "parent returned: {{call_parent.output}}"
+    }
+  ],
+  "output_step": "after_call"
+}

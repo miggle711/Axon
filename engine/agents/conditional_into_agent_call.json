@@ -1,0 +1,43 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "conditional_into_agent_call",
+  "description": "Tests a conditional step whose on_true branch is an agent_call rather than a plain tool_call: step_1 always outputs \"success\", so check always routes to call_greeter, spawning a real child run (greeter.json) as the result of a branching decision. Confirms canEnqueueStep's generic dependency check and spawnChildRun work together correctly when the step becoming enqueable is an agent_call, not just when it is enqueued unconditionally from the top of a run.",
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "tool_call",
+      "depends_on": [],
+      "tool": "echo",
+      "input_template": "success"
+    },
+    {
+      "id": "check",
+      "type": "conditional",
+      "depends_on": [
+        "step_1"
+      ],
+      "condition": "{{step_1.output}} == success",
+      "on_true": "call_greeter",
+      "on_false": "on_false_step"
+    },
+    {
+      "id": "call_greeter",
+      "type": "agent_call",
+      "depends_on": [
+        "check"
+      ],
+      "input_template": "{{user_input}}",
+      "agent": "greeter"
+    },
+    {
+      "id": "on_false_step",
+      "type": "tool_call",
+      "depends_on": [
+        "check"
+      ],
+      "tool": "echo",
+      "input_template": "took the false branch"
+    }
+  ],
+  "output_step": "call_greeter"
+}
