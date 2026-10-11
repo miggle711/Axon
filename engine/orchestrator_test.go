@@ -258,6 +258,82 @@ func TestOnStepCompleted_ConditionalRouting(t *testing.T) {
 // "done when" criteria for agent_call: a parent run with an agent_call
 // step spawns a child run, and the child's completion correctly
 // unblocks the parent's next step.
+// TestRunEvents_RecordedInOrder covers #38: Run.Events should record
+// this run's meaningful transitions in the order they actually
+// happened, not just the final snapshot the rest of Run already
+// gives. Uses the same conditional_test_agent shape as
+// TestOnStepCompleted_ConditionalRouting, since that test already
+// establishes what each step does.
+func TestRunEvents_RecordedInOrder(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+
+	agent := AgentDefinition{
+		Name:  "conditional_test_agent",
+		Steps: conditionalTestAgentSteps(),
+	}
+
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	if len(run.Events) != 2 {
+		t.Fatalf("expected 2 events after CreateRun (run_created, step_enqueued), got %d: %+v", len(run.Events), run.Events)
+	}
+	if run.Events[0].Type != "run_created" {
+		t.Errorf("expected first event to be run_created, got %q", run.Events[0].Type)
+	}
+	if run.Events[1].Type != "step_enqueued" || run.Events[1].StepID != "step_1" {
+		t.Errorf("expected second event to be step_enqueued for step_1, got %+v", run.Events[1])
+	}
+
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "step_1", Output: "success"}); err != nil {
+		t.Fatalf("OnStepCompleted(step_1) failed: %v", err)
+	}
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "on_true_step", Output: "took the true branch"}); err != nil {
+		t.Fatalf("OnStepCompleted(on_true_step) failed: %v", err)
+	}
+
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+
+	wantTypes := []string{
+		"run_created",
+		"step_enqueued",       // step_1
+		"step_completed",      // step_1
+		"condition_evaluated", // check
+		"step_enqueued",       // on_true_step
+		"step_completed",      // on_true_step
+		"run_completed",
+	}
+	if len(run.Events) != len(wantTypes) {
+		t.Fatalf("expected %d events, got %d: %+v", len(wantTypes), len(run.Events), run.Events)
+	}
+	for i, wantType := range wantTypes {
+		if run.Events[i].Type != wantType {
+			t.Errorf("event %d: expected type %q, got %q", i, wantType, run.Events[i].Type)
+		}
+		if run.Events[i].Timestamp.IsZero() {
+			t.Errorf("event %d: expected a non-zero timestamp", i)
+		}
+	}
+
+	// Timestamps should be non-decreasing in the order events were
+	// recorded, since that ordering is the entire point of this field.
+	for i := 1; i < len(run.Events); i++ {
+		if run.Events[i].Timestamp.Before(run.Events[i-1].Timestamp) {
+			t.Errorf("event %d (%s) has an earlier timestamp than event %d (%s)", i, run.Events[i].Type, i-1, run.Events[i-1].Type)
+		}
+	}
+}
+
 func TestAgentCall_SpawnsChildRunAndPropagatesCompletion(t *testing.T) {
 	server := newFakeQueueServer(t)
 	defer server.Close()

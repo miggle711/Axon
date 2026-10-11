@@ -99,6 +99,26 @@ type Run struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Events is an append-only record of this run's meaningful
+	// transitions, in the order they happened (#38). A Run's other
+	// fields are a snapshot of current state; nothing on them says
+	// whether step_a finished before or after step_b, or how long
+	// anything took - which matters for debugging a race or a stuck
+	// run, not just reading its final outcome. Appended at the same
+	// points orchestrator.go already logs via slog, not tracked
+	// separately, so the event log can't drift from what the code
+	// actually does. Persisted the same way as every other Run field,
+	// no separate store (see #38's own open question on this).
+	Events []RunEvent `json:"events"`
+}
+
+// RunEvent is one entry in Run.Events.
+type RunEvent struct {
+	Timestamp time.Time `json:"timestamp"`
+	Type      string    `json:"type"`
+	StepID    string    `json:"step_id,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
 }
 
 // StepPayload represents the data payload for a single step in the workflow

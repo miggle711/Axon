@@ -69,6 +69,32 @@ func (s *Server) getRunHandler(c *gin.Context) {
 	c.JSON(200, run)
 }
 
+// getRunEventsHandler - GET /runs/:id/events
+// Returns a run's append only event log (#38), in the order events
+// happened. Separate from GET /runs/:id's full Run snapshot since
+// Events is usually the one field someone debugging a race or a stuck
+// run actually wants, without the rest of the (potentially large)
+// Run payload.
+func (s *Server) getRunEventsHandler(c *gin.Context) {
+	runID := c.Param("id")
+	if runID == "" {
+		c.JSON(400, ErrorResponse{Error: "Missing run ID", Code: 400})
+		return
+	}
+
+	run, err := s.orchestrator.GetRun(c.Request.Context(), runID)
+	if err != nil {
+		c.JSON(500, ErrorResponse{Error: "Failed to retrieve run", Code: 500})
+		return
+	}
+	if run == nil {
+		c.JSON(404, ErrorResponse{Error: "Run not found", Code: 404})
+		return
+	}
+
+	c.JSON(200, run.Events)
+}
+
 // listRunsHandler lists top-level runs, newest first (#53). Query
 // params: agent_name and status filter (both optional, ANDed
 // together), limit and offset paginate (limit defaults to 20, capped
