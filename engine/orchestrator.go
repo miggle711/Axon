@@ -53,25 +53,11 @@ func (orchestrator *Orchestrator) lockFor(runID string) *sync.Mutex {
 	return orchestrator.runLocks[runID]
 }
 
-// canEnqueueStep reports whether step is ready to run: it has not
-// already been enqueued, and every dependency in step.DependsOn has
-// a recorded result in run.
-//
-// A supervisor's Options steps are deliberately re-run across loop
-// iterations, but that repeat-enqueuing goes through
-// enqueueOptionStep directly, not through this function — so this
-// check staying strictly one-shot is correct: once an Options step
-// finally settles (its supervisor stops), it must not be eligible for
-// enqueuing again via the normal resolve loop below.
-func canEnqueueStep(step StepDefinition, run *Run) bool {
-	return canEnqueueStepFast(step, run, doneSet(run))
-}
-
 // doneSet builds the "already completed or skipped" membership set
-// canEnqueueStepFast needs, once, rather than every call rescanning
+// canEnqueueStep needs, once, rather than every call rescanning
 // run.CompletedSteps/run.SkippedSteps as linear slices (#11) - this is
 // the same cost runIsComplete already pays on every call, computed
-// here once and shared across every canEnqueueStepFast call in one
+// here once and shared across every canEnqueueStep call in one
 // resolveSteps pass instead of once per step.
 func doneSet(run *Run) map[string]bool {
 	done := make(map[string]bool, len(run.CompletedSteps)+len(run.SkippedSteps))
@@ -84,11 +70,20 @@ func doneSet(run *Run) map[string]bool {
 	return done
 }
 
-// canEnqueueStepFast is canEnqueueStep taking a precomputed done set
-// instead of rescanning run.CompletedSteps/run.SkippedSteps itself, so
-// a caller resolving many steps in one pass (resolveSteps) can build
-// the set once instead of paying that scan on every step.
-func canEnqueueStepFast(step StepDefinition, run *Run, done map[string]bool) bool {
+// canEnqueueStep reports whether step is ready to run: it has not
+// already been enqueued, and every dependency in step.DependsOn has
+// a recorded result in run. Takes a precomputed done set (see doneSet)
+// instead of scanning run.CompletedSteps/run.SkippedSteps itself, so a
+// caller resolving many steps in one pass (resolveSteps) builds that
+// set once instead of paying the scan on every step.
+//
+// A supervisor's Options steps are deliberately re-run across loop
+// iterations, but that repeat-enqueuing goes through
+// enqueueOptionStep directly, not through this function - so this
+// check staying strictly one-shot is correct: once an Options step
+// finally settles (its supervisor stops), it must not be eligible for
+// enqueuing again via the normal resolve loop below.
+func canEnqueueStep(step StepDefinition, run *Run, done map[string]bool) bool {
 	// Check if the step has already been enqueued in the run
 	if _, exists := run.EnqueuedSteps[step.ID]; exists {
 		return false
@@ -261,7 +256,7 @@ func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) er
 		step := worklist[0]
 		worklist = worklist[1:]
 
-		if !canEnqueueStepFast(step, run, done) {
+		if !canEnqueueStep(step, run, done) {
 			continue
 		}
 
