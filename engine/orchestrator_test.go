@@ -342,6 +342,71 @@ func TestAgentCall_SpawnsChildRunAndPropagatesCompletion(t *testing.T) {
 	}
 }
 
+// TestAgentCall_OutputStepNamingConditional covers #56's fourth
+// constraint: a sub-agent whose OutputStep names a conditional step
+// directly, rather than one of its branches. Before the fix, the
+// parent got back the winning branch's literal step ID string (e.g.
+// "on_true_step") instead of that branch's actual output, since a
+// conditional's own StepResults entry holds the winner's step ID, not
+// its output - confirmed live against conditional_subagent.json/
+// conditional_subagent_caller.json before being fixed here.
+func TestAgentCall_OutputStepNamingConditional(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+
+	childAgent := AgentDefinition{
+		Name:       "child_agent",
+		OutputStep: "check",
+		Steps:      conditionalTestAgentSteps(),
+	}
+	registry := MapAgentRegistry{"child_agent": childAgent}
+
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), registry, discardLogger)
+
+	parentAgent := AgentDefinition{
+		Name: "parent_agent",
+		Steps: []StepDefinition{
+			{ID: "call_child", Type: StepTypeAgentCall, Agent: "child_agent", DependsOn: []string{}},
+		},
+	}
+
+	ctx := context.Background()
+	parentRun, err := orchestrator.CreateRun(ctx, parentAgent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	enqueuedRef := parentRun.EnqueuedSteps["call_child"]
+	childRunID := enqueuedRef[len("run:"):]
+
+	// Drive the child run's steps the same way TestOnStepCompleted_ConditionalRouting
+	// does: step_1 completes with "success", routing check to on_true_step.
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: childRunID, StepID: "step_1", Output: "success"}); err != nil {
+		t.Fatalf("OnStepCompleted(step_1) failed: %v", err)
+	}
+	if err := orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: childRunID, StepID: "on_true_step", Output: "the real on_true_step output"}); err != nil {
+		t.Fatalf("OnStepCompleted(on_true_step) failed: %v", err)
+	}
+
+	childRun, err := orchestrator.GetRun(ctx, childRunID)
+	if err != nil {
+		t.Fatalf("GetRun(child) failed: %v", err)
+	}
+	if childRun.Status != "completed" {
+		t.Fatalf("expected child run to be completed, got %q", childRun.Status)
+	}
+
+	parentRun, err = orchestrator.GetRun(ctx, parentRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(parent) failed: %v", err)
+	}
+	if parentRun.StepResults["call_child"] != "the real on_true_step output" {
+		t.Errorf("expected call_child result to be on_true_step's real output, got %q", parentRun.StepResults["call_child"])
+	}
+}
+
 func TestAgentCall_ErrorCases(t *testing.T) {
 	server := newFakeQueueServer(t)
 	defer server.Close()
