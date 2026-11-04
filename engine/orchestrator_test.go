@@ -31,14 +31,17 @@ func newFakeRunStore() *fakeRunStore {
 // closely enough to reproduce the read-modify-write race a shared
 // pointer would mask.
 //
-// Events is deliberately excluded here, mirroring RedisRunStore's own
-// SaveRun (#81): it's persisted only via AppendEvent, one entry at a
-// time, so a SaveRun call must never overwrite what AppendEvent has
-// already recorded with whatever (possibly stale) Events slice the
-// caller's in-memory run happens to be carrying.
+// Events, CompletedSteps, and SkippedSteps are deliberately excluded
+// here, mirroring RedisRunStore's own SaveRun (#81): each is persisted
+// only via its own Append* call, one entry at a time, so a SaveRun
+// call must never overwrite what those calls have already recorded
+// with whatever (possibly stale) slice the caller's in-memory run
+// happens to be carrying.
 func (s *fakeRunStore) SaveRun(ctx context.Context, run *Run) error {
 	blob := *run
 	blob.Events = nil
+	blob.CompletedSteps = nil
+	blob.SkippedSteps = nil
 	data, err := json.Marshal(&blob)
 	if err != nil {
 		return err
@@ -46,15 +49,20 @@ func (s *fakeRunStore) SaveRun(ctx context.Context, run *Run) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	existingEvents := []RunEvent{}
+	var existingEvents []RunEvent
+	var existingCompleted, existingSkipped []string
 	if existing, ok := s.runs[run.ID]; ok {
 		existingEvents = existing.Events
+		existingCompleted = existing.CompletedSteps
+		existingSkipped = existing.SkippedSteps
 	}
 	s.runs[run.ID] = &Run{}
 	if err := json.Unmarshal(data, s.runs[run.ID]); err != nil {
 		return err
 	}
 	s.runs[run.ID].Events = existingEvents
+	s.runs[run.ID].CompletedSteps = existingCompleted
+	s.runs[run.ID].SkippedSteps = existingSkipped
 	return nil
 }
 
@@ -70,6 +78,32 @@ func (s *fakeRunStore) AppendEvent(ctx context.Context, runID string, event RunE
 		s.runs[runID] = run
 	}
 	run.Events = append(run.Events, event)
+	return nil
+}
+
+// AppendCompletedStep/AppendSkippedSteps mirror RedisRunStore's own,
+// same independence from SaveRun as AppendEvent above.
+func (s *fakeRunStore) AppendCompletedStep(ctx context.Context, runID, stepID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		run = &Run{ID: runID}
+		s.runs[runID] = run
+	}
+	run.CompletedSteps = append(run.CompletedSteps, stepID)
+	return nil
+}
+
+func (s *fakeRunStore) AppendSkippedSteps(ctx context.Context, runID string, stepIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		run = &Run{ID: runID}
+		s.runs[runID] = run
+	}
+	run.SkippedSteps = append(run.SkippedSteps, stepIDs...)
 	return nil
 }
 
