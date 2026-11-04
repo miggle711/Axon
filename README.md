@@ -88,7 +88,7 @@ unknown step type) is rejected with every problem it found, not just the first.
 
 ### Worked examples
 
-Four real, committed agents, each exercising a step combination that isn't obvious
+Five real, committed agents, each exercising a step combination that isn't obvious
 from the step type table alone.
 
 **Conditional branching** (`engine/agents/greeter.json` style, as a 4-step version
@@ -110,6 +110,34 @@ The part that's easy to miss: `on_true`/`on_false` only say where to route. The
 target steps each still need `check` in their own `depends_on`, or they'd never
 become runnable. `engine/agentbuilder`'s `Conditional` function adds that second
 edge automatically; writing this by hand means remembering it twice.
+
+`condition` only supports exact string comparisons (`==`, `!=`, `contains`,
+`engine/orchestrator.go`'s `evaluateCondition`). That's fine against a `tool_call`'s
+predictable output, but routing on an `llm_call`'s free-form text the same way is
+brittle: a model answering "Yes, it does." won't match `== yes`. The safe
+convention, the same discipline every supervisor prompt in this repo already uses
+("respond with exactly: done") - constrain the `llm_call`'s prompt to one exact
+word, and route with `contains` rather than `==` so trailing punctuation or
+capitalization in what the model actually returns doesn't break the match:
+
+```json
+{
+  "id": "classify",
+  "type": "llm_call",
+  "prompt_template": "...\n\nRespond with exactly one word: yes or no. Nothing else."
+},
+{
+  "id": "route",
+  "type": "conditional",
+  "condition": "{{classify.output}} contains yes",
+  "on_true": "answer_directly",
+  "on_false": "needs_lookup",
+  "depends_on": ["classify"]
+}
+```
+
+See `engine/agents/llm_conditional_classifier.json` for the full, real, committed
+example (built with `engine/agentbuilder/examples/llm_conditional_classifier`).
 
 **Calling a sub-agent** (`engine/agents/greeter_caller.json`): one agent calling
 another as a child run.
