@@ -1,0 +1,40 @@
+{
+  "$schema": "./agent.schema.json",
+  "name": "llm_conditional_classifier",
+  "description": "Demonstrates #25's safe convention for routing a conditional on an llm_call's output: classify is constrained to answer exactly \"yes\" or \"no\", and route matches with contains rather than ==, so minor variation in what the model actually returns (trailing punctuation, capitalization) doesn't break the match the way == would. No output_step is set here since only one branch actually runs per run, same reasoning as the conditional scaffold (axon init --type conditional). Requires GROQ_API_KEY on the worker.",
+  "steps": [
+    {
+      "id": "classify",
+      "type": "llm_call",
+      "depends_on": [],
+      "prompt_template": "Decide whether the question below can be answered from general knowledge, without looking anything up.\n\nQuestion: {{user_input}}\n\nRespond with exactly one word: yes or no. Nothing else."
+    },
+    {
+      "id": "route",
+      "type": "conditional",
+      "depends_on": [
+        "classify"
+      ],
+      "condition": "{{classify.output}} contains yes",
+      "on_true": "answer_directly",
+      "on_false": "needs_lookup"
+    },
+    {
+      "id": "answer_directly",
+      "type": "llm_call",
+      "depends_on": [
+        "route"
+      ],
+      "prompt_template": "Answer the question directly and concisely.\n\nQuestion: {{user_input}}"
+    },
+    {
+      "id": "needs_lookup",
+      "type": "tool_call",
+      "depends_on": [
+        "route"
+      ],
+      "tool": "echo",
+      "input_template": "This question needs a lookup, not just general knowledge: {{user_input}}"
+    }
+  ]
+}
