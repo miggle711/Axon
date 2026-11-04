@@ -30,15 +30,47 @@ func newFakeRunStore() *fakeRunStore {
 // each GetRun returns an independent copy — matching real behavior
 // closely enough to reproduce the read-modify-write race a shared
 // pointer would mask.
+//
+// Events is deliberately excluded here, mirroring RedisRunStore's own
+// SaveRun (#81): it's persisted only via AppendEvent, one entry at a
+// time, so a SaveRun call must never overwrite what AppendEvent has
+// already recorded with whatever (possibly stale) Events slice the
+// caller's in-memory run happens to be carrying.
 func (s *fakeRunStore) SaveRun(ctx context.Context, run *Run) error {
-	data, err := json.Marshal(run)
+	blob := *run
+	blob.Events = nil
+	data, err := json.Marshal(&blob)
 	if err != nil {
 		return err
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	existingEvents := []RunEvent{}
+	if existing, ok := s.runs[run.ID]; ok {
+		existingEvents = existing.Events
+	}
 	s.runs[run.ID] = &Run{}
-	return json.Unmarshal(data, s.runs[run.ID])
+	if err := json.Unmarshal(data, s.runs[run.ID]); err != nil {
+		return err
+	}
+	s.runs[run.ID].Events = existingEvents
+	return nil
+}
+
+// AppendEvent mirrors RedisRunStore.AppendEvent: persists event
+// directly against the stored run, independent of whatever Events
+// slice a concurrent SaveRun call might be carrying.
+func (s *fakeRunStore) AppendEvent(ctx context.Context, runID string, event RunEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		run = &Run{ID: runID}
+		s.runs[runID] = run
+	}
+	run.Events = append(run.Events, event)
+	return nil
 }
 
 func (s *fakeRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
