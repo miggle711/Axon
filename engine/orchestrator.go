@@ -277,7 +277,7 @@ func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) er
 			run.CompletedSteps = append(run.CompletedSteps, step.ID)
 			done[step.ID] = true
 			log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
-			appendEvent(run, "condition_evaluated", step.ID, fmt.Sprintf("result=%v winner=%q loser=%q", result, winner, loser))
+			orchestrator.appendEvent(ctx, run, "condition_evaluated", step.ID, fmt.Sprintf("result=%v winner=%q loser=%q", result, winner, loser))
 			queue(step.ID)
 
 			if loser != "" {
@@ -300,7 +300,7 @@ func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) er
 			}
 			run.EnqueuedSteps[step.ID] = "run:" + childRun.ID
 			log.Info("child run spawned", "step_id", step.ID, "child_run_id", childRun.ID)
-			appendEvent(run, "child_run_spawned", step.ID, "child_run_id="+childRun.ID)
+			orchestrator.appendEvent(ctx, run, "child_run_spawned", step.ID, "child_run_id="+childRun.ID)
 			continue
 		}
 
@@ -329,7 +329,7 @@ func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) er
 		}
 		run.EnqueuedSteps[step.ID] = jobID
 		log.Info("step enqueued", "step_id", step.ID, "step_type", step.Type, "job_id", jobID)
-		appendEvent(run, "step_enqueued", step.ID, "job_id="+jobID)
+		orchestrator.appendEvent(ctx, run, "step_enqueued", step.ID, "job_id="+jobID)
 	}
 
 	return nil
@@ -370,7 +370,7 @@ func (orchestrator *Orchestrator) createRun(ctx context.Context, definition Agen
 		CreatedAt:              time.Now(),
 		UpdatedAt:              time.Now(),
 	}
-	appendEvent(run, "run_created", "", "")
+	orchestrator.appendEvent(ctx, run, "run_created", "", "")
 
 	// Enqueue the initial steps of the workflow that have no
 	// dependencies (or, for conditionals, resolve them).
@@ -449,7 +449,7 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 		return fmt.Errorf("failed to retrieve run: %v", err)
 	}
 
-	appendEvent(run, "step_completed", payload.StepID, previewText(payload.Output))
+	orchestrator.appendEvent(ctx, run, "step_completed", payload.StepID, previewText(payload.Output))
 
 	// A supervisor step's own completion (its LLM decision came back
 	// from the worker) is handled entirely separately: it doesn't
@@ -473,7 +473,7 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 			continue
 		}
 		log.Info("option step completed, re-invoking supervisor", "supervisor_step_id", supervisorID)
-		appendEvent(run, "option_step_completed", payload.StepID, "supervisor_step_id="+supervisorID)
+		orchestrator.appendEvent(ctx, run, "option_step_completed", payload.StepID, "supervisor_step_id="+supervisorID)
 		run.StepResults[payload.StepID] = payload.Output
 		if err := orchestrator.store.SaveRun(ctx, run); err != nil {
 			log.Error("failed to save updated run", "error", err)
@@ -549,9 +549,9 @@ func (orchestrator *Orchestrator) OnStepFailed(ctx context.Context, payload Webh
 	run.FailedSteps = append(run.FailedSteps, payload.StepID)
 	run.Status = "failed"
 	run.UpdatedAt = time.Now()
-	appendEvent(run, "step_failed", payload.StepID, payload.Reason)
+	orchestrator.appendEvent(ctx, run, "step_failed", payload.StepID, payload.Reason)
 	if run.ParentRunID != "" {
-		appendEvent(run, "failure_propagated_to_parent", payload.StepID, "parent_run_id="+run.ParentRunID+" parent_step_id="+run.ParentStepID)
+		orchestrator.appendEvent(ctx, run, "failure_propagated_to_parent", payload.StepID, "parent_run_id="+run.ParentRunID+" parent_step_id="+run.ParentStepID)
 	}
 
 	if err := orchestrator.store.SaveRun(ctx, run); err != nil {
@@ -596,7 +596,7 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 
 	if run.Status == "completed" {
 		log.Info("run completed")
-		appendEvent(run, "run_completed", "", "")
+		orchestrator.appendEvent(ctx, run, "run_completed", "", "")
 	}
 
 	// Save the updated run back to the store
@@ -630,13 +630,28 @@ func (orchestrator *Orchestrator) finalizeStepCompletion(ctx context.Context, ru
 // appendEvent records one entry in run.Events, in the order this is
 // called. Call sites mirror this file's existing log.Info calls at the
 // same transitions, not a separately tracked set of moments.
-func appendEvent(run *Run, eventType, stepID, detail string) {
-	run.Events = append(run.Events, RunEvent{
+func (orchestrator *Orchestrator) appendEvent(ctx context.Context, run *Run, eventType, stepID, detail string) {
+	event := RunEvent{
 		Timestamp: time.Now(),
 		Type:      eventType,
 		StepID:    stepID,
 		Detail:    detail,
-	})
+	}
+	run.Events = append(run.Events, event)
+
+	// Written directly to the store, not as part of run's own
+	// SaveRun - Events is append-only by nature, so persisting one new
+	// entry here as its own RunStore.AppendEvent call means SaveRun
+	// never needs to re-marshal the whole, ever-growing Events slice
+	// on every call (#81). A failure here is logged, not returned or
+	// retried: a run's correctness never depends on its event log, and
+	// returning an error from every one of appendEvent's many call
+	// sites would mean threading this historically-non-failing call
+	// into error paths that currently have none, for a purely
+	// observability feature.
+	if err := orchestrator.store.AppendEvent(ctx, run.ID, event); err != nil {
+		orchestrator.logger.Error("failed to persist run event", "run_id", run.ID, "event_type", eventType, "error", err)
+	}
 }
 
 // resolveOutputStepResult returns the real output an agent's
@@ -704,7 +719,7 @@ func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context,
 				return fmt.Errorf("failed to save updated run: %v", err)
 			}
 			log.Info("first iteration step auto-picked, skipping LLM decision", "first_iteration_step", supervisorStep.FirstIterationStep)
-			appendEvent(run, "supervisor_first_iteration_auto_picked", supervisorStep.ID, "first_iteration_step="+supervisorStep.FirstIterationStep)
+			orchestrator.appendEvent(ctx, run, "supervisor_first_iteration_auto_picked", supervisorStep.ID, "first_iteration_step="+supervisorStep.FirstIterationStep)
 			return orchestrator.enqueueOptionStep(ctx, run, optionStep)
 		}
 	}
@@ -726,7 +741,7 @@ func (orchestrator *Orchestrator) enqueueSupervisorDecision(ctx context.Context,
 	}
 	run.EnqueuedSteps[supervisorStep.ID] = jobID
 	log.Info("supervisor decision requested", "iteration", run.SupervisorIterations[supervisorStep.ID], "job_id", jobID)
-	appendEvent(run, "supervisor_decision_requested", supervisorStep.ID, fmt.Sprintf("iteration=%d job_id=%s", run.SupervisorIterations[supervisorStep.ID], jobID))
+	orchestrator.appendEvent(ctx, run, "supervisor_decision_requested", supervisorStep.ID, fmt.Sprintf("iteration=%d job_id=%s", run.SupervisorIterations[supervisorStep.ID], jobID))
 	return orchestrator.store.SaveRun(ctx, run)
 }
 
@@ -749,7 +764,7 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 	log := orchestrator.logger.With("run_id", run.ID, "step_id", supervisorStep.ID)
 	decision = strings.TrimSpace(decision)
 	log.Info("supervisor decision received", "decision", decision)
-	appendEvent(run, "supervisor_decision_received", supervisorStep.ID, "decision="+decision)
+	orchestrator.appendEvent(ctx, run, "supervisor_decision_received", supervisorStep.ID, "decision="+decision)
 
 	isOption := false
 	for _, opt := range supervisorStep.Options {
@@ -796,7 +811,7 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 	run.StepResults[supervisorStep.ID] = run.StepResults[lastChoice]
 	run.CompletedSteps = append(run.CompletedSteps, supervisorStep.ID)
 	log.Info("supervisor loop stopped", "reason", supervisorStopReason(atCap, decision), "iterations", run.SupervisorIterations[supervisorStep.ID], "last_choice", lastChoice)
-	appendEvent(run, "supervisor_loop_stopped", supervisorStep.ID, fmt.Sprintf("reason=%s iterations=%d last_choice=%s", supervisorStopReason(atCap, decision), run.SupervisorIterations[supervisorStep.ID], lastChoice))
+	orchestrator.appendEvent(ctx, run, "supervisor_loop_stopped", supervisorStep.ID, fmt.Sprintf("reason=%s iterations=%d last_choice=%s", supervisorStopReason(atCap, decision), run.SupervisorIterations[supervisorStep.ID], lastChoice))
 	return orchestrator.finalizeStepCompletion(ctx, run)
 }
 
@@ -822,7 +837,7 @@ func (orchestrator *Orchestrator) enqueueOptionStep(ctx context.Context, run *Ru
 		}
 		run.EnqueuedSteps[optionStep.ID] = "run:" + childRun.ID
 		log.Info("option step spawned a child run", "child_run_id", childRun.ID)
-		appendEvent(run, "option_step_child_run_spawned", optionStep.ID, "child_run_id="+childRun.ID)
+		orchestrator.appendEvent(ctx, run, "option_step_child_run_spawned", optionStep.ID, "child_run_id="+childRun.ID)
 		return orchestrator.store.SaveRun(ctx, run)
 	}
 
@@ -842,7 +857,7 @@ func (orchestrator *Orchestrator) enqueueOptionStep(ctx context.Context, run *Ru
 	}
 	run.EnqueuedSteps[optionStep.ID] = jobID
 	log.Info("option step enqueued", "step_type", optionStep.Type, "job_id", jobID)
-	appendEvent(run, "option_step_enqueued", optionStep.ID, "job_id="+jobID)
+	orchestrator.appendEvent(ctx, run, "option_step_enqueued", optionStep.ID, "job_id="+jobID)
 	return orchestrator.store.SaveRun(ctx, run)
 }
 

@@ -19,6 +19,16 @@ type RunStore interface {
 	// child run spawned via agent_call - see #53) newest first,
 	// optionally filtered by opts, paginated via opts.Limit/opts.Offset.
 	ListRuns(ctx context.Context, opts ListRunsOptions) ([]*Run, error)
+
+	// AppendEvent persists one new RunEvent for runID, in addition to
+	// (not instead of) it living in that Run's own in-memory Events
+	// slice. Events is append-only by nature, so writing each entry
+	// here as it happens means SaveRun never needs to re-marshal the
+	// whole, ever-growing Events slice on every call (#81) - a run
+	// with n events would otherwise pay O(n) cost on every single
+	// SaveRun just to re-persist event history nothing about that call
+	// actually changed.
+	AppendEvent(ctx context.Context, runID string, event RunEvent) error
 }
 
 // ListRunsOptions filters and paginates a ListRuns call. AgentName and
@@ -67,14 +77,44 @@ func NewRedisRunStore(redisURL string) (*RedisRunStore, error) {
 // cheap (ZREM is a no-op if the member isn't in that set) and always
 // correct regardless of what the previous status was, without an
 // extra read to find out.
+//
+// Two fields are deliberately excluded from this call's own blob
+// (#81), each for its own reason rather than one general "trim the
+// blob" pass:
+//
+//   - Steps is set once in CreateRun and never mutated again for the
+//     life of a run, so rewriting it on every single SaveRun call
+//     (potentially the largest field, the full agent definition) pays
+//     an O(len(Steps)) marshal cost for data that provably never
+//     changed. Written once to its own key via SetNX (a no-op past
+//     the first call), not as part of this blob.
+//   - Events only ever grows by appending one entry at a time, and
+//     each entry is already persisted the instant it's created, via
+//     AppendEvent (called from orchestrator.go's appendEvent) - so
+//     re-marshaling the whole, ever-growing slice here on every call
+//     would re-persist history this call never touched.
+//
+// Both costs were real and measured: see BenchmarkOnStepCompleted_LinearChain
+// in orchestrator_test.go, which is what surfaced this in the first
+// place while verifying #11's unrelated fix.
 func (s *RedisRunStore) SaveRun(ctx context.Context, run *Run) error {
-	data, err := json.Marshal(run)
+	blob := *run // shallow copy: slices/maps still point at run's own backing data, fine since nothing here mutates them
+	blob.Steps = nil
+	blob.Events = nil
+
+	data, err := json.Marshal(&blob)
+	if err != nil {
+		return err
+	}
+
+	stepsData, err := json.Marshal(run.Steps)
 	if err != nil {
 		return err
 	}
 
 	pipe := s.client.TxPipeline()
 	pipe.Set(ctx, runKey(run.ID), data, 0)
+	pipe.SetNX(ctx, runStepsKey(run.ID), stepsData, 0)
 
 	if run.ParentRunID == "" {
 		score := float64(run.CreatedAt.UnixNano())
@@ -91,8 +131,29 @@ func (s *RedisRunStore) SaveRun(ctx context.Context, run *Run) error {
 	return err
 }
 
+// AppendEvent pushes one new RunEvent onto runID's event list (see
+// RunStore's doc comment for why this is separate from SaveRun). A
+// Redis list, via RPUSH, is the natural fit: Events is append-only and
+// always read in the order it was written, exactly what a list gives
+// for O(1) per append instead of rewriting the whole history.
+func (s *RedisRunStore) AppendEvent(ctx context.Context, runID string, event RunEvent) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return s.client.RPush(ctx, runEventsKey(runID), data).Err()
+}
+
 func (s *RedisRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
-	data, err := s.client.Get(ctx, runKey(runID)).Bytes()
+	pipe := s.client.Pipeline()
+	blobCmd := pipe.Get(ctx, runKey(runID))
+	stepsCmd := pipe.Get(ctx, runStepsKey(runID))
+	eventsCmd := pipe.LRange(ctx, runEventsKey(runID), 0, -1)
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	data, err := blobCmd.Bytes()
 	if err == redis.Nil {
 		return nil, nil // run not found
 	}
@@ -104,6 +165,28 @@ func (s *RedisRunStore) GetRun(ctx context.Context, runID string) (*Run, error) 
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, err
 	}
+
+	if stepsData, err := stepsCmd.Bytes(); err == nil {
+		if err := json.Unmarshal(stepsData, &run.Steps); err != nil {
+			return nil, err
+		}
+	} else if err != redis.Nil {
+		return nil, err
+	}
+
+	eventsData, err := eventsCmd.Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	run.Events = make([]RunEvent, 0, len(eventsData))
+	for _, raw := range eventsData {
+		var event RunEvent
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			return nil, err
+		}
+		run.Events = append(run.Events, event)
+	}
+
 	return &run, nil
 }
 
@@ -173,6 +256,14 @@ func (s *RedisRunStore) ListRuns(ctx context.Context, opts ListRunsOptions) ([]*
 
 func runKey(runID string) string {
 	return fmt.Sprintf("run:%s", runID)
+}
+
+func runStepsKey(runID string) string {
+	return fmt.Sprintf("run:%s:steps", runID)
+}
+
+func runEventsKey(runID string) string {
+	return fmt.Sprintf("run:%s:events", runID)
 }
 
 func runsByTimeKey() string {

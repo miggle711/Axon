@@ -40,6 +40,13 @@ func (s *fakeRunStore) GetRun(ctx context.Context, runID string) (*engine.Run, e
 	return s.runs[runID], nil
 }
 
+func (s *fakeRunStore) AppendEvent(ctx context.Context, runID string, event engine.RunEvent) error {
+	if run, ok := s.runs[runID]; ok {
+		run.Events = append(run.Events, event)
+	}
+	return nil
+}
+
 func (s *fakeRunStore) ListRuns(ctx context.Context, opts engine.ListRunsOptions) ([]*engine.Run, error) {
 	return nil, nil
 }
