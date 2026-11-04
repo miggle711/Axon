@@ -274,7 +274,10 @@ func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) er
 
 			// winner may be "" if that branch intentionally does nothing
 			run.StepResults[step.ID] = winner
-			run.CompletedSteps = append(run.CompletedSteps, step.ID)
+			if err := orchestrator.addCompletedStep(ctx, run, step.ID); err != nil {
+				log.Error("failed to persist condition completion", "step_id", step.ID, "error", err)
+				return err
+			}
 			done[step.ID] = true
 			log.Info("condition evaluated", "step_id", step.ID, "result", result, "winner", winner, "loser", loser)
 			orchestrator.appendEvent(ctx, run, "condition_evaluated", step.ID, fmt.Sprintf("result=%v winner=%q loser=%q", result, winner, loser))
@@ -282,7 +285,10 @@ func (orchestrator *Orchestrator) resolveSteps(ctx context.Context, run *Run) er
 
 			if loser != "" {
 				skipped := append([]string{loser}, findTransitiveDependents(loser, run.Steps)...)
-				run.SkippedSteps = append(run.SkippedSteps, skipped...)
+				if err := orchestrator.addSkippedSteps(ctx, run, skipped); err != nil {
+					log.Error("failed to persist skipped steps", "step_id", step.ID, "error", err)
+					return err
+				}
 				for _, id := range skipped {
 					done[id] = true
 					queue(id)
@@ -488,7 +494,10 @@ func (orchestrator *Orchestrator) OnStepCompleted(ctx context.Context, payload W
 	}
 
 	run.StepResults[payload.StepID] = payload.Output
-	run.CompletedSteps = append(run.CompletedSteps, payload.StepID)
+	if err := orchestrator.addCompletedStep(ctx, run, payload.StepID); err != nil {
+		log.Error("failed to persist step completion", "error", err)
+		return err
+	}
 	return orchestrator.finalizeStepCompletion(ctx, run)
 }
 
@@ -654,6 +663,44 @@ func (orchestrator *Orchestrator) appendEvent(ctx context.Context, run *Run, eve
 	}
 }
 
+// addCompletedStep mirrors appendEvent's pattern for run.CompletedSteps
+// (#81): mutate the in-memory slice, then persist just the one new
+// addition via RunStore.AppendCompletedStep rather than letting
+// SaveRun re-marshal the whole, ever-growing slice.
+//
+// Unlike appendEvent, a failure here is returned, not just logged:
+// CompletedSteps/SkippedSteps are functional state, not observability
+// history - doneSet (and canEnqueueStep/runIsComplete through it) read
+// them to decide what may still run and whether a run is finished. If
+// this persist silently failed, SaveRun's blob omits the slice
+// entirely (see storage.go's SaveRun), so the next GetRun - possibly
+// from a different process entirely - would reconstruct a run that
+// has forgotten this step ever completed, able to re-enqueue it or
+// leave the run stuck indefinitely. A run's correctness does depend on
+// this being durably persisted, so a failed append has to fail the
+// step completion that triggered it, the same way a failed SaveRun
+// already does everywhere else in this file.
+func (orchestrator *Orchestrator) addCompletedStep(ctx context.Context, run *Run, stepID string) error {
+	run.CompletedSteps = append(run.CompletedSteps, stepID)
+	if err := orchestrator.store.AppendCompletedStep(ctx, run.ID, stepID); err != nil {
+		return fmt.Errorf("failed to persist completed step %s: %w", stepID, err)
+	}
+	return nil
+}
+
+// addSkippedSteps is addCompletedStep's equivalent for
+// run.SkippedSteps, taking several step IDs at once since a
+// conditional's losing branch skips itself plus every step
+// transitively depending on it in a single addition. Same
+// error-propagation reasoning as addCompletedStep.
+func (orchestrator *Orchestrator) addSkippedSteps(ctx context.Context, run *Run, stepIDs []string) error {
+	run.SkippedSteps = append(run.SkippedSteps, stepIDs...)
+	if err := orchestrator.store.AppendSkippedSteps(ctx, run.ID, stepIDs); err != nil {
+		return fmt.Errorf("failed to persist skipped steps %v: %w", stepIDs, err)
+	}
+	return nil
+}
+
 // resolveOutputStepResult returns the real output an agent's
 // OutputStep should propagate. For most step types this is just
 // run.StepResults[stepID] directly. A conditional is the one
@@ -809,7 +856,10 @@ func (orchestrator *Orchestrator) handleSupervisorDecision(ctx context.Context, 
 	delete(run.ActiveSupervisorChoice, supervisorStep.ID)
 
 	run.StepResults[supervisorStep.ID] = run.StepResults[lastChoice]
-	run.CompletedSteps = append(run.CompletedSteps, supervisorStep.ID)
+	if err := orchestrator.addCompletedStep(ctx, run, supervisorStep.ID); err != nil {
+		log.Error("failed to persist supervisor loop completion", "error", err)
+		return err
+	}
 	log.Info("supervisor loop stopped", "reason", supervisorStopReason(atCap, decision), "iterations", run.SupervisorIterations[supervisorStep.ID], "last_choice", lastChoice)
 	orchestrator.appendEvent(ctx, run, "supervisor_loop_stopped", supervisorStep.ID, fmt.Sprintf("reason=%s iterations=%d last_choice=%s", supervisorStopReason(atCap, decision), run.SupervisorIterations[supervisorStep.ID], lastChoice))
 	return orchestrator.finalizeStepCompletion(ctx, run)

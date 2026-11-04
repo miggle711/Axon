@@ -29,6 +29,16 @@ type RunStore interface {
 	// SaveRun just to re-persist event history nothing about that call
 	// actually changed.
 	AppendEvent(ctx context.Context, runID string, event RunEvent) error
+
+	// AppendCompletedStep and AppendSkippedSteps are CompletedSteps/
+	// SkippedSteps's equivalent of AppendEvent: both fields only ever
+	// grow by appending (nothing ever removes an entry - see
+	// doneSet's callers), so persisting each addition directly here
+	// means SaveRun never needs to re-marshal either ever-growing
+	// slice on every call, the same reasoning and the same #81 this
+	// entry documents for Events.
+	AppendCompletedStep(ctx context.Context, runID, stepID string) error
+	AppendSkippedSteps(ctx context.Context, runID string, stepIDs []string) error
 }
 
 // ListRunsOptions filters and paginates a ListRuns call. AgentName and
@@ -78,7 +88,7 @@ func NewRedisRunStore(redisURL string) (*RedisRunStore, error) {
 // correct regardless of what the previous status was, without an
 // extra read to find out.
 //
-// Two fields are deliberately excluded from this call's own blob
+// Four fields are deliberately excluded from this call's own blob
 // (#81), each for its own reason rather than one general "trim the
 // blob" pass:
 //
@@ -88,11 +98,13 @@ func NewRedisRunStore(redisURL string) (*RedisRunStore, error) {
 //     an O(len(Steps)) marshal cost for data that provably never
 //     changed. Written once to its own key via SetNX (a no-op past
 //     the first call), not as part of this blob.
-//   - Events only ever grows by appending one entry at a time, and
-//     each entry is already persisted the instant it's created, via
-//     AppendEvent (called from orchestrator.go's appendEvent) - so
-//     re-marshaling the whole, ever-growing slice here on every call
-//     would re-persist history this call never touched.
+//   - Events, CompletedSteps, and SkippedSteps each only ever grow by
+//     appending (nothing ever removes an entry from any of the
+//     three), and each entry is already persisted the instant it's
+//     created, via AppendEvent/AppendCompletedStep/AppendSkippedSteps
+//     (called from orchestrator.go) - so re-marshaling the whole,
+//     ever-growing slice here on every call would re-persist history
+//     this call never touched.
 //
 // Both costs were real and measured: see BenchmarkOnStepCompleted_LinearChain
 // in orchestrator_test.go, which is what surfaced this in the first
@@ -101,6 +113,8 @@ func (s *RedisRunStore) SaveRun(ctx context.Context, run *Run) error {
 	blob := *run // shallow copy: slices/maps still point at run's own backing data, fine since nothing here mutates them
 	blob.Steps = nil
 	blob.Events = nil
+	blob.CompletedSteps = nil
+	blob.SkippedSteps = nil
 
 	data, err := json.Marshal(&blob)
 	if err != nil {
@@ -144,11 +158,35 @@ func (s *RedisRunStore) AppendEvent(ctx context.Context, runID string, event Run
 	return s.client.RPush(ctx, runEventsKey(runID), data).Err()
 }
 
+// AppendCompletedStep pushes one new step ID onto runID's completed
+// list, the same RPUSH-based pattern as AppendEvent, for the same
+// reason (see RunStore's doc comment).
+func (s *RedisRunStore) AppendCompletedStep(ctx context.Context, runID, stepID string) error {
+	return s.client.RPush(ctx, runCompletedStepsKey(runID), stepID).Err()
+}
+
+// AppendSkippedSteps pushes one or more new step IDs onto runID's
+// skipped list in one call, since a conditional's losing branch can
+// skip several steps at once (the branch itself plus every step
+// transitively depending on it).
+func (s *RedisRunStore) AppendSkippedSteps(ctx context.Context, runID string, stepIDs []string) error {
+	if len(stepIDs) == 0 {
+		return nil
+	}
+	args := make([]interface{}, len(stepIDs))
+	for i, id := range stepIDs {
+		args[i] = id
+	}
+	return s.client.RPush(ctx, runSkippedStepsKey(runID), args...).Err()
+}
+
 func (s *RedisRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 	pipe := s.client.Pipeline()
 	blobCmd := pipe.Get(ctx, runKey(runID))
 	stepsCmd := pipe.Get(ctx, runStepsKey(runID))
 	eventsCmd := pipe.LRange(ctx, runEventsKey(runID), 0, -1)
+	completedCmd := pipe.LRange(ctx, runCompletedStepsKey(runID), 0, -1)
+	skippedCmd := pipe.LRange(ctx, runSkippedStepsKey(runID), 0, -1)
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return nil, err
 	}
@@ -185,6 +223,29 @@ func (s *RedisRunStore) GetRun(ctx context.Context, runID string) (*Run, error) 
 			return nil, err
 		}
 		run.Events = append(run.Events, event)
+	}
+
+	// A run saved before this split still has its real CompletedSteps/
+	// SkippedSteps in the blob itself (json.Unmarshal above already
+	// populated run.CompletedSteps/run.SkippedSteps from it), and has
+	// no :completed_steps/:skipped_steps list key at all yet. Only
+	// overwrite with the list's contents when it actually has entries,
+	// so a legacy run's history is read from the blob instead of being
+	// silently replaced by an empty list the first time it's fetched
+	// under the new format - the list is the source of truth once a
+	// run actually uses it (SaveRun excludes both fields from every
+	// run's blob going forward, old or new, so a run that completes
+	// even one more step after this deploys starts accumulating in the
+	// list, same as it always did for Events).
+	if completedSteps, err := completedCmd.Result(); err != nil && err != redis.Nil {
+		return nil, err
+	} else if len(completedSteps) > 0 {
+		run.CompletedSteps = completedSteps
+	}
+	if skippedSteps, err := skippedCmd.Result(); err != nil && err != redis.Nil {
+		return nil, err
+	} else if len(skippedSteps) > 0 {
+		run.SkippedSteps = skippedSteps
 	}
 
 	return &run, nil
@@ -264,6 +325,14 @@ func runStepsKey(runID string) string {
 
 func runEventsKey(runID string) string {
 	return fmt.Sprintf("run:%s:events", runID)
+}
+
+func runCompletedStepsKey(runID string) string {
+	return fmt.Sprintf("run:%s:completed_steps", runID)
+}
+
+func runSkippedStepsKey(runID string) string {
+	return fmt.Sprintf("run:%s:skipped_steps", runID)
 }
 
 func runsByTimeKey() string {

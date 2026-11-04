@@ -42,6 +42,20 @@ func (s *fakeRunStore) AppendEvent(ctx context.Context, runID string, event engi
 	return nil
 }
 
+func (s *fakeRunStore) AppendCompletedStep(ctx context.Context, runID, stepID string) error {
+	if run, ok := s.runs[runID]; ok {
+		run.CompletedSteps = append(run.CompletedSteps, stepID)
+	}
+	return nil
+}
+
+func (s *fakeRunStore) AppendSkippedSteps(ctx context.Context, runID string, stepIDs []string) error {
+	if run, ok := s.runs[runID]; ok {
+		run.SkippedSteps = append(run.SkippedSteps, stepIDs...)
+	}
+	return nil
+}
+
 func (s *fakeRunStore) ListRuns(ctx context.Context, opts engine.ListRunsOptions) ([]*engine.Run, error) {
 	return nil, nil
 }
