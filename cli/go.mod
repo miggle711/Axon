@@ -1,6 +1,6 @@
 module axon-cli
 
-go 1.25.5
+go 1.26.0
 
 require axon-engine v0.0.0
 
