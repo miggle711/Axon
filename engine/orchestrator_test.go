@@ -20,6 +20,14 @@ var discardLogger = slog.New(slog.DiscardHandler)
 type fakeRunStore struct {
 	mu   sync.Mutex
 	runs map[string]*Run
+
+	// failAppendCompletedStep, when set, makes every
+	// AppendCompletedStep call fail - used to confirm a persist
+	// failure here actually fails the step completion that triggered
+	// it (#87's review fix), rather than being silently swallowed the
+	// way appendEvent's failures are for the (correctness-irrelevant)
+	// event log.
+	failAppendCompletedStep bool
 }
 
 func newFakeRunStore() *fakeRunStore {
@@ -86,6 +94,9 @@ func (s *fakeRunStore) AppendEvent(ctx context.Context, runID string, event RunE
 func (s *fakeRunStore) AppendCompletedStep(ctx context.Context, runID, stepID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failAppendCompletedStep {
+		return fmt.Errorf("simulated AppendCompletedStep failure")
+	}
 	run, ok := s.runs[runID]
 	if !ok {
 		run = &Run{ID: runID}
@@ -396,6 +407,51 @@ func TestRunEvents_RecordedInOrder(t *testing.T) {
 	for i := 1; i < len(run.Events); i++ {
 		if run.Events[i].Timestamp.Before(run.Events[i-1].Timestamp) {
 			t.Errorf("event %d (%s) has an earlier timestamp than event %d (%s)", i, run.Events[i].Type, i-1, run.Events[i-1].Type)
+		}
+	}
+}
+
+// TestOnStepCompleted_FailsWhenCompletedStepPersistFails covers a
+// review finding on #87: CompletedSteps/SkippedSteps are functional
+// state (doneSet, and canEnqueueStep/runIsComplete through it, read
+// them to decide what may still run), not observability history like
+// Events. A step completion must fail outright if persisting it to
+// CompletedSteps fails, rather than silently continuing with
+// in-memory-only state that the next GetRun (possibly from a
+// different process) would never see.
+func TestOnStepCompleted_FailsWhenCompletedStepPersistFails(t *testing.T) {
+	server := newFakeQueueServer(t)
+	defer server.Close()
+
+	store := newFakeRunStore()
+	orchestrator := NewOrchestrator(store, NewQueueClient(server.URL), MapAgentRegistry{}, discardLogger)
+
+	agent := AgentDefinition{
+		Name: "fail_persist_test_agent",
+		Steps: []StepDefinition{
+			{ID: "step_1", Type: StepTypeToolCall, Tool: "echo", InputTemplate: "x", DependsOn: []string{}},
+		},
+	}
+	ctx := context.Background()
+	run, err := orchestrator.CreateRun(ctx, agent, "start")
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	store.failAppendCompletedStep = true
+	err = orchestrator.OnStepCompleted(ctx, WebhookPayload{RunID: run.ID, StepID: "step_1", Output: "done"})
+	if err == nil {
+		t.Fatal("expected OnStepCompleted to fail when persisting the completed step fails, got no error")
+	}
+
+	store.failAppendCompletedStep = false
+	run, err = orchestrator.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	for _, id := range run.CompletedSteps {
+		if id == "step_1" {
+			t.Errorf("expected step_1 NOT to be recorded as completed in the stored run after a failed persist, got CompletedSteps=%v", run.CompletedSteps)
 		}
 	}
 }

@@ -225,13 +225,27 @@ func (s *RedisRunStore) GetRun(ctx context.Context, runID string) (*Run, error) 
 		run.Events = append(run.Events, event)
 	}
 
-	run.CompletedSteps, err = completedCmd.Result()
-	if err != nil && err != redis.Nil {
+	// A run saved before this split still has its real CompletedSteps/
+	// SkippedSteps in the blob itself (json.Unmarshal above already
+	// populated run.CompletedSteps/run.SkippedSteps from it), and has
+	// no :completed_steps/:skipped_steps list key at all yet. Only
+	// overwrite with the list's contents when it actually has entries,
+	// so a legacy run's history is read from the blob instead of being
+	// silently replaced by an empty list the first time it's fetched
+	// under the new format - the list is the source of truth once a
+	// run actually uses it (SaveRun excludes both fields from every
+	// run's blob going forward, old or new, so a run that completes
+	// even one more step after this deploys starts accumulating in the
+	// list, same as it always did for Events).
+	if completedSteps, err := completedCmd.Result(); err != nil && err != redis.Nil {
 		return nil, err
+	} else if len(completedSteps) > 0 {
+		run.CompletedSteps = completedSteps
 	}
-	run.SkippedSteps, err = skippedCmd.Result()
-	if err != nil && err != redis.Nil {
+	if skippedSteps, err := skippedCmd.Result(); err != nil && err != redis.Nil {
 		return nil, err
+	} else if len(skippedSteps) > 0 {
+		run.SkippedSteps = skippedSteps
 	}
 
 	return &run, nil
