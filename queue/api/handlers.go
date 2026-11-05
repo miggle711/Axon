@@ -48,8 +48,15 @@ func (s *Server) enqueueHandler(c *gin.Context) {
 		return
 	}
 
+	id, err := uuid.NewV7()
+	if err != nil {
+		s.logger.Error("failed to generate job ID", "error", err)
+		c.JSON(500, ErrorResponse{Error: "Failed to enqueue job", Code: 500})
+		return
+	}
+
 	job := &jobpkg.Job{
-		ID:         uuid.New().String(),
+		ID:         id.String(),
 		Type:       req.Type,
 		Payload:    req.Payload,
 		Priority:   req.Priority,
@@ -60,8 +67,7 @@ func (s *Server) enqueueHandler(c *gin.Context) {
 		RunAt:      time.Now().Unix(),
 	}
 
-	err := s.queue.Enqueue(c.Request.Context(), job)
-	if err != nil {
+	if err := s.queue.Enqueue(c.Request.Context(), job); err != nil {
 		s.logger.Error("failed to enqueue job", "job_id", job.ID, "type", job.Type, "error", err)
 		c.JSON(500, ErrorResponse{Error: "Failed to enqueue job", Code: 500})
 		return
