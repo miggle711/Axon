@@ -258,6 +258,42 @@ go run ./cmd list
 go run ./cmd init --type conditional --name my_agent
 ```
 
+### Debugging a run
+
+`GET /runs/:id` returns a run's current snapshot (`status`, `step_results`,
+`completed_steps`, and so on), but nothing on it says *when* anything happened or in
+what order. `GET /runs/:id/events` returns that instead: an append-only, timestamped
+list of the run's own transitions, in the order they actually happened.
+
+```sh
+curl -s http://localhost:8000/runs/<run_id>/events
+```
+
+```json
+[
+  { "timestamp": "2026-11-05T08:12:38.72Z", "type": "run_created" },
+  { "timestamp": "2026-11-05T08:12:38.73Z", "type": "child_run_spawned", "step_id": "call_greeter", "detail": "child_run_id=01a1a90c-ebce-7338-97e4-660a36e4d763" },
+  { "timestamp": "2026-11-05T08:12:39.21Z", "type": "step_completed", "step_id": "call_greeter", "detail": "Hello, world!" },
+  { "timestamp": "2026-11-05T08:12:39.21Z", "type": "step_enqueued", "step_id": "after_greeting", "detail": "job_id=01a1a90c-edab-7877-8a22-6e83db907f2f" },
+  { "timestamp": "2026-11-05T08:12:39.22Z", "type": "step_completed", "step_id": "after_greeting", "detail": "greeter said: Hello, world!" },
+  { "timestamp": "2026-11-05T08:12:39.22Z", "type": "run_completed" }
+]
+```
+
+That's the real output from running `greeter_caller` above: the child run's spawn
+and completion are both visible as their own events, which is what the snapshot
+alone can't show - whether a step happened before or after another, or how long
+anything took. This is the tool for the actual debugging case (a race, a run stuck
+mid-way, a step that completed somewhere unexpected), not something every caller
+needs on the happy path.
+
+The engine, worker, and queue all also log structured JSON with a shared
+correlation ID threaded through: `run_id`/`step_id` in the engine and worker,
+`job_id` tying the worker's view of a job to the queue's. Grepping one `run_id`
+across the engine and worker logs, then the matching `job_id` across the queue's,
+traces a single step's full lifecycle (enqueued, dequeued, acknowledged) across all
+three services.
+
 ### Running without Docker
 
 Each service is a normal Go binary if you'd rather run them directly (useful for
